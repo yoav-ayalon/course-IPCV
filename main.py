@@ -1,4 +1,3 @@
-
 import numpy as np
 import matplotlib.pyplot as plt
 # import pandas as pd
@@ -12,8 +11,13 @@ from skimage.color import rgb2hsv, hsv2rgb
 from typing import List, Union
 from pathlib import Path
 
+
 script_dir = Path(__file__).resolve().parent
 images_dir = script_dir/"IMG"
+rect_start = None
+rect_end = None
+drawing = False
+
 
 def show_image(img_or_list: Union[np.ndarray, List[np.ndarray]],
                row_plot: int = 1,
@@ -82,6 +86,15 @@ def detect_corners_ShiTomasi(gray, max_corner=150):
         #     x, y = c.ravel()
         #     cv2.circle(rgb_shi, (x, y), 4, (0, 255, 0), -1)
 
+
+        if corners is None or len(corners) == 0:
+            print("No corners found in ROI.")
+            return None
+        else:
+            corners = np.array(corners, dtype=np.float32)
+            if corners.ndim == 3:   # shape (N, 1, 2)
+                corners = corners.reshape(-1, 2) # shape (N, 2)
+
         return corners
 
 
@@ -104,24 +117,26 @@ def orb_features(img_bgr):
     return rgb, keypoints, descriptors
 
 
-
-
-rect_start = None
-rect_end = None
-drawing = False
-
-def select_roi_on_rgb(rgb):
+def select_roi_on_rgb(rgb, max_width=1200, max_height=1000):
     """
-    פותח חלון, נותן לבחור מלבן עם העכבר על התמונה rgb.
-    מחזיר: (x1, y1, x2, y2), roi_rgb
-    אם המשתמש יצא בלי לבחור – מחזיר (None, None)
+    Allow user to select a rectangular ROI on the RGB image using mouse.
+    Returns (rect_coords, roi_rgb) where rect_coords = (x1, y1, x2, y2).
+    If no ROI selected, returns (None, None).
     """
+
+
     global rect_start, rect_end, drawing
     rect_start = None
     rect_end = None
     drawing = False
 
     win_name = "Select ROI (drag with mouse, ENTER/ESC to finish)"
+
+    h, w = rgb.shape[:2]
+    scale = min(max_width / w, max_height / h, 1.0) 
+
+    disp_w, disp_h = int(w * scale), int(h * scale)
+    rgb_disp = cv2.resize(rgb, (disp_w, disp_h), interpolation=cv2.INTER_AREA)
 
     def mouse_callback(event, x, y, flags, param):
         global rect_start, rect_end, drawing
@@ -142,17 +157,17 @@ def select_roi_on_rgb(rgb):
     cv2.setMouseCallback(win_name, mouse_callback)
 
     while True:
-        # מציגים עותק של התמונה, עם מלבן אם יש
-        frame = rgb.copy()
+        # Display a copy of the image, with a rectangle if present
+        frame = rgb_disp.copy() 
         if rect_start and rect_end:
             cv2.rectangle(frame, rect_start, rect_end, (0, 255, 0), 2)
 
-        # OpenCV עובד ב-BGR, אז נהפוך רק לצורך הצגה
+        # OpenCV works in BGR, so convert only for display purposes
         frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
         cv2.imshow(win_name, frame_bgr)
 
         key = cv2.waitKey(1) & 0xFF
-        if key in (13, 27):  # ENTER או ESC
+        if key in (13, 27): # ENTER or ESC to finish
             break
 
     cv2.destroyWindow(win_name)
@@ -165,9 +180,44 @@ def select_roi_on_rgb(rgb):
     x1, x2 = sorted([x1, x2])
     y1, y2 = sorted([y1, y2])
 
-    roi_rgb = rgb[y1:y2, x1:x2]
+    orig_x1 = int(x1 / scale)
+    orig_y1 = int(y1 / scale)
+    orig_x2 = int(x2 / scale)
+    orig_y2 = int(y2 / scale)
 
-    return (x1, y1, x2, y2), roi_rgb
+    roi_rgb = rgb[orig_y1:orig_y2, orig_x1:orig_x2]
+
+    return (orig_x1, orig_y1, orig_x2, orig_y2), roi_rgb
+
+
+def translate_corners_to_global(corners, rect_x1, rect_y1):
+    global_points = []
+    for (cx, cy) in corners:
+            gx = int(cx + rect_x1)
+            gy = int(cy + rect_y1)
+            global_points.append((gx, gy))
+    return global_points
+
+
+def debug_draw_corners(rgb_debug, global_points):
+    for (gx, gy) in global_points:
+        cv2.circle(rgb_debug, (gx, gy), 4, (0, 255, 0), -1)
+    return rgb_debug
+
+
+def create_blurred_mask(rgb, global_points):
+
+    h, w = rgb.shape[:2] # height, width
+    mask = np.zeros((h, w), dtype=np.uint8) # binary mask
+    pts = np.array(global_points, dtype=np.int32) 
+    hull = cv2.convexHull(pts) # compute convex hull
+    cv2.fillConvexPoly(mask, hull, 255) # fill hull area in mask
+
+    blurred_full = cv2.GaussianBlur(rgb, ksize=(0, 0), sigmaX=25, sigmaY=25)
+    return mask, blurred_full
+
+
+
 
 
 
@@ -177,78 +227,25 @@ def select_roi_on_rgb(rgb):
 
 if __name__ == "__main__":
     
-    
-
-    # img_hsv = rgb2hsv(rgb)           # returns floats in [0,1]
-    # H, S, V = img_hsv[...,0], img_hsv[...,1], img_hsv[...,2]
-    # # show_image([rgb, H, S, V], row_plot=1)
-    
-    # gray_S = (S * 255).astype(np.uint8)
-    # rgb_shi = detect_corners_ShiTomasi(gray_S, rgb, max_corner=100)
-    # show_image([rgb,S, rgb_shi], titles=["Original RGB", "S - for saturation","Shi-Tomasi Corners"], row_plot=1)
-
-    # rgb1_orb, kps1_orb, desc1_orb = orb_features(bgr)
-
-    # # Visualize keypoints
-    # vis1 = rgb1_orb.copy()
-    # cv2.drawKeypoints(rgb1_orb, kps1_orb, vis1,
-    #                 color=(0, 255, 0),
-    #                 flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
-
-    # show_image([vis1], titles=["ORB Keypoints"], row_plot=1)
-
-    bgr, gray, rgb = load_image("IMG_001.PNG")
-    # show_image([rgb], titles=["RGB"], row_plot=1)
+    bgr, gray, rgb = load_image("IMG_002.jpeg")
 
     (rect_x1, rect_y1, rect_x2, rect_y2), roi_rgb = select_roi_on_rgb(rgb)
     print(f"Selected rectangle: ({rect_x1}, {rect_y1}) to ({rect_x2}, {rect_y2})")
+    
     if roi_rgb is not None:
         show_image(roi_rgb, titles=["Selected ROI"], row_plot=1)
     
         roi_gray = cv2.cvtColor(roi_rgb, cv2.COLOR_RGB2GRAY)
+        corners = detect_corners_ShiTomasi(roi_gray, max_corner=20)
+        global_points = translate_corners_to_global(corners, rect_x1, rect_y1)
+        
+        rgb_debug = debug_draw_corners(rgb.copy(), global_points)
+        show_image([rgb_debug], titles=["Corners debug"], row_plot=1)
 
-        roi_shi_corners = detect_corners_ShiTomasi(roi_gray, max_corner=20)
-
-        if roi_shi_corners is None or len(roi_shi_corners) == 0:
-            print("No corners found in ROI.")
-        else:
-            # לוודא צורה (N, 2)
-            corners = np.array(roi_shi_corners, dtype=np.float32)
-            if corners.ndim == 3:   # במקרה של (N,1,2) כמו goodFeaturesToTrack
-                corners = corners.reshape(-1, 2)
-
-
-            # 4. לתרגם את הפינות ל"קואורדינטות גלובליות" ולהציג על התמונה
-            global_points = []
-            for (cx, cy) in corners:
-                gx = int(cx + rect_x1)
-                gy = int(cy + rect_y1)
-                global_points.append((gx, gy))
-            
-            rgb_debug = rgb.copy()
-            for (gx, gy) in global_points:
-                cv2.circle(rgb_debug, (gx, gy), 4, (0, 255, 0), -1)
-            show_image([rgb_debug], titles=["Corners debug"], row_plot=1)
-
-            h, w = rgb.shape[:2]
-            # מסיכה ריקה בגודל התמונה
-            mask = np.zeros((h, w), dtype=np.uint8)
-            # נקודות האובייקט כ־np.array
-            pts = np.array(global_points, dtype=np.int32)
-            # מעטפת קמורה של הפינות
-            hull = cv2.convexHull(pts)
-            # מילוי הפוליגון במסיכה
-            cv2.fillConvexPoly(mask, hull, 255)   # אזור האובייקט = 255
-
-            # טשטוש חזק של כל התמונה
-            # אפשר לשחק עם sigmaX / sigmaY כדי להעצים
-            blurred_full = cv2.GaussianBlur(rgb, ksize=(0, 0), sigmaX=25, sigmaY=25)
-
-            # שילוב – רק איפה שהמסיכה 255 ניקח מהתמונה המטושטשת
-            result = rgb.copy()
-            result[mask == 255] = blurred_full[mask == 255]
-
-            show_image([result], titles=["Object blurred (no green points)"], row_plot=1)
+        mask, blurred_full = create_blurred_mask(rgb, global_points)
+        result = rgb.copy()
+        result[mask == 255] = blurred_full[mask == 255]
+        show_image([result], titles=["Object blurred"], row_plot=1)
 
 
 
