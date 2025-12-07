@@ -325,12 +325,39 @@ def laplacian(roi_gray):
 def canny(roi_gray):
     # Canny (works on 8-bit)
     g8 = (roi_gray*255).astype(np.uint8)
-    edges = cv2.Canny(g8, threshold1=60, threshold2=180)
+    edges = cv2.Canny(g8, threshold1=30, threshold2=90)
 
     show_image([edges], row_plot=1,
            titles='Canny')
 
     return edges
+
+def diliation(roi_gray):
+    k7  = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
+    dilated = cv2.dilate(roi_gray, k7, iterations=1)
+    show_image(
+    [roi_gray, dilated], row_plot=1,
+    titles=["Binary", "Dilate (3×3) – grows strokes, fills small gaps, makes much noise in the backround"]
+)
+    return dilated
+
+
+def Morphological_gradient(roi_gray):
+    # Choose a structuring element
+    k = cv2.getStructuringElement(cv2.MORPH_RECT, (5,5))
+
+    # Dilate the binary mask
+    dilated = cv2.dilate(roi_gray, k)
+
+    # Subtract the original binary image from the dilated version
+    # → the difference is only the NEW outer pixels that appeared
+    outer = cv2.absdiff(dilated, roi_gray)
+
+    # Visualize
+    show_image([roi_gray, outer],
+                titles=["Binary image", "Outer contour (from dilation)"])
+    
+    return outer
 
 
 if __name__ == "__main__":
@@ -348,6 +375,14 @@ if __name__ == "__main__":
         # Binary than grey mask
         # roi_gray_masked = binary_mask(roi_gray)
         # corners = detect_corners_ShiTomasi(roi_gray_masked, max_corner=30)
+
+        # Dilation 
+        # dilated = diliation(roi_gray)
+        # corners = detect_corners_ShiTomasi(dilated, max_corner=30)
+
+        # Morphological gradient
+        # outer = Morphological_gradient(roi_gray)
+        # corners = detect_corners_ShiTomasi(outer, max_corner=30)
 
         # Apply CLAHE on grayscale image
         # he_clahe = clahe(roi_gray)
@@ -372,7 +407,6 @@ if __name__ == "__main__":
         # edges = canny(roi_gray)
         # corners = detect_corners_ShiTomasi(edges, max_corner=30)
 
-
         # corners = detect_corners_ShiTomasi(roi_gray, max_corner=30)
         global_points = translate_corners_to_global(corners, rect_x1, rect_y1)
         
@@ -380,7 +414,7 @@ if __name__ == "__main__":
         show_image([rgb_debug], titles=["Corners debug"], row_plot=1)
 
         mask, blurred_full = create_blurred_mask(rgb, global_points)
-        #mask, blurred_full = mean_blur(gray, rgb, global_points)
+        # mask, blurred_full = mean_blur(gray, rgb, global_points)
 
         result = rgb.copy()
         result[mask == 255] = blurred_full[mask == 255]
