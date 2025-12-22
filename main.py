@@ -18,6 +18,7 @@ import scipy.ndimage as ndi
 
 script_dir = Path(__file__).resolve().parent
 images_dir = script_dir/"IMG"
+model_dir = script_dir/"model"
 rect_start = None
 rect_end = None
 drawing = False
@@ -83,12 +84,7 @@ def detect_corners_ShiTomasi(gray, max_corner=150):
                                         maxCorners=max_corner,
                                         qualityLevel=0.01,
                                         minDistance=10)
-        corners = np.intp(corners)  # integer coordinates
-
-        # rgb_shi = rgb.copy()
-        # for c in corners:
-        #     x, y = c.ravel()
-        #     cv2.circle(rgb_shi, (x, y), 4, (0, 255, 0), -1)
+        corners = np.intp(corners)  # integer coordinats
 
 
         if corners is None or len(corners) == 0:
@@ -423,6 +419,7 @@ def canny(roi_gray):
     show_image([edges], row_plot=1, titles='Canny')
     return edges
 
+
 def diliation(roi_gray):
     k7  = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
     dilated = cv2.dilate(roi_gray, k7, iterations=1)
@@ -451,9 +448,470 @@ def Morphological_gradient(roi_gray):
     return outer
 
 
+def overlay_mask(rgb: np.ndarray, mask: np.ndarray, alpha: float = 0.5) -> np.ndarray:
+    """Overlay a boolean mask on RGB (mask=True highlighted)."""
+    out = rgb.copy()
+    if mask.dtype != bool:
+        mask = mask.astype(bool)
+    # highlight mask region in red-ish overlay (no fixed colormap assumptions)
+    highlight = np.zeros_like(out)
+    highlight[..., 0] = 255  # R channel
+    out[mask] = (alpha * highlight[mask] + (1 - alpha) * out[mask]).astype(np.uint8)
+    return out
+
+
+def seg_start(img):
+    bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+
+    # 1) Otsu binarization
+    _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+    # 2) Noise removal (opening)
+    kernel = np.ones((3,3), np.uint8)
+    opening = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel, iterations=4)
+
+    # 3) Sure background
+    sure_bg = cv2.dilate(opening, kernel, iterations=3)
+
+    # 4) Sure foreground via distance transform
+    dist = cv2.distanceTransform(opening, cv2.DIST_L2, 5)
+    _, sure_fg = cv2.threshold(dist, 0.2 * dist.max(), 255, 0)
+    sure_fg = sure_fg.astype(np.uint8)
+
+    # 5) Unknown region
+    unknown = cv2.subtract(sure_bg, sure_fg)
+
+    # 6) Markers
+    num_labels, markers = cv2.connectedComponents(sure_fg)
+    markers = markers + 1
+    markers[unknown == 255] = 0
+
+    # 7) Watershed
+    markers_ws = cv2.watershed(bgr.copy(), markers.copy())
+
+    # boundaries marked as -1
+    vis = img.copy()
+    vis[markers_ws == -1] = [255, 0, 0]  # red boundary
+
+    print(f"Number of segments found: {num_labels}")
+
+    show_image(
+        [img, thresh, opening, dist, sure_fg, vis],
+        row_plot=2,
+        titles=[
+            "Input", "Otsu thresh", "Opening", "Distance transform",
+            "Sure FG markers", "Watershed boundaries overlay"])
+
+
+def SAM_segmentation(img):
+    """
+    Perform automatic segmentation using Segment Anything Model (SAM).
+    
+    Requirements:
+    - Download SAM model checkpoint from: https://github.com/facebookresearch/segment-anything#model-checkpoints
+    - Place it in: model/checkpoints/sam_vit_b_01ec64.pth
+    """
+    try:
+        import torch
+        from segment_anything import sam_model_registry, SamPredictor, SamAutomaticMaskGenerator
+    except ImportError as e:
+        print(f"Error: {e}")
+        print("Install with: pip install torch torchvision segment-anything")
+        return
+
+    # Path to SAM checkpoint
+    SAM_CKPT = model_dir / "checkpoints" / "sam_vit_b_01ec64.pth"
+    
+    if not SAM_CKPT.exists():
+        print(f"Checkpoint not found: {SAM_CKPT}")
+        print("\nDownload from: https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth")
+        print(f"Place it in: {SAM_CKPT.parent}")
+        # Create directory if it doesn't exist
+        SAM_CKPT.parent.mkdir(parents=True, exist_ok=True)
+        return
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    sam = sam_model_registry["vit_b"](checkpoint=str(SAM_CKPT))
+    sam.to(device=device)
+
+    print("✔️ SAM loaded on:", device)
+
+    mask_generator = SamAutomaticMaskGenerator(
+        model=sam,
+        points_per_side=4,       # speed vs quality. Try 8, 16, etc. it is amount of prompts in a power of two. (4^2 = 16 prompts). So 4 is approx 16 times faster than 16.
+        pred_iou_thresh=0.88,
+        stability_score_thresh=0.92,
+        min_mask_region_area=200)
+
+    # Convert to RGB uint8 if needed
+    if img.dtype != np.uint8:
+        img = (img * 255).astype(np.uint8)
+    
+    masks = mask_generator.generate(img)
+    print("Masks generated:", len(masks))
+
+    # Sort masks by area (largest first)
+    masks_sorted = sorted(masks, key=lambda x: x["area"], reverse=True)
+
+    # Visualize top N masks with distinct colors
+    N = 8
+    # Define distinct colors for each mask
+    distinct_colors = [
+        [0, 0, 255],     # Blue
+        [0, 255, 0],     # Green
+        [255, 0, 0],     # Red
+        [255, 255, 0],   # Yellow
+        [255, 0, 255],   # Magenta
+        [0, 255, 255],   # Cyan
+        [255, 128, 0],   # Orange
+        [128, 0, 255],   # Purple
+    ]
+    
+    vis = img.copy().astype(np.float32)
+    for i in range(min(N, len(masks_sorted))):
+        m = masks_sorted[i]["segmentation"]
+        color = np.array(distinct_colors[i % len(distinct_colors)], dtype=np.float32)
+        vis[m] = vis[m] * 0.65 + color * 0.35
+    
+    vis = np.clip(vis, 0, 255).astype(np.uint8)
+    
+    show_image([img, vis], row_plot=1, titles=["Original", f"SAM automatic masks (top {min(N,len(masks_sorted))} overlaid with distinct colors)"])
+
+
+def grabcut_segmentation(roi_rgb, iterations=5, show_steps=True):
+    """
+    GrabCut segmentation: Estimates foreground within ROI image.
+    
+    Args:
+        roi_rgb: ROI RGB image (extracted region)
+        iterations: Number of GrabCut iterations (default=5)
+        show_steps: Whether to show intermediate visualization (default=True)
+    
+    Returns:
+        mask: Binary mask (0/255) of the segmented object within ROI
+        final_vis: Visualization with mask overlay
+    """
+    h, w = roi_rgb.shape[:2]
+    # Use entire ROI as bounding box with small margin
+    margin = 5
+    rect_grabcut = (margin, margin, w - 2*margin, h - 2*margin)  # (x, y, w, h) format
+    
+    # Initialize mask and models for GrabCut
+    mask_grabcut = np.zeros((h, w), dtype=np.uint8)
+    bgd_model = np.zeros((1, 65), dtype=np.float64)
+    fgd_model = np.zeros((1, 65), dtype=np.float64)
+    
+    # Run GrabCut
+    cv2.grabCut(roi_rgb, mask_grabcut, rect_grabcut, bgd_model, fgd_model, 
+                iterations, cv2.GC_INIT_WITH_RECT)
+    
+    # Create binary mask (foreground = 1 or 3, background = 0 or 2)
+    mask_fg = np.where((mask_grabcut == cv2.GC_FGD) | (mask_grabcut == cv2.GC_PR_FGD), 255, 0).astype(np.uint8)
+    
+    # Keep only largest connected component
+    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(mask_fg, connectivity=8)
+    if num_labels > 1:  # 0 is background
+        # Find largest component (excluding background)
+        largest_component = 1 + np.argmax(stats[1:, cv2.CC_STAT_AREA])
+        mask_largest = (labels == largest_component).astype(np.uint8) * 255
+    else:
+        mask_largest = mask_fg
+    
+    # Morphological cleanup (closing then opening)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    mask_cleaned = cv2.morphologyEx(mask_largest, cv2.MORPH_CLOSE, kernel, iterations=2)
+    mask_cleaned = cv2.morphologyEx(mask_cleaned, cv2.MORPH_OPEN, kernel, iterations=1)
+    
+    # Visualization
+    vis_grabcut = overlay_mask(roi_rgb, mask_fg.astype(bool), alpha=0.4)
+    vis_largest = overlay_mask(roi_rgb, mask_largest.astype(bool), alpha=0.4)
+    vis_final = overlay_mask(roi_rgb, mask_cleaned.astype(bool), alpha=0.4)
+    
+    if show_steps:
+        show_image(
+            [roi_rgb, vis_grabcut, vis_largest, vis_final],
+            row_plot=2,
+            titles=[
+                "Input ROI",
+                "GrabCut raw output",
+                "Largest component only",
+                "After morphological cleanup"
+            ]
+        )
+    
+    print(f"GrabCut: Found {num_labels - 1} components, kept largest")
+    return mask_cleaned, vis_final
+
+
+def sam_box_prompt_segmentation(roi_rgb, show_steps=True):
+    """
+    SAM with box prompt: Use entire ROI as box prompt, select best mask automatically.
+    
+    Args:
+        roi_rgb: ROI RGB image (extracted region)
+        show_steps: Whether to show intermediate visualization (default=True)
+    
+    Returns:
+        mask: Binary mask (0/255) of the selected object within ROI
+        final_vis: Visualization with mask overlay
+    """
+    try:
+        import torch
+        from segment_anything import sam_model_registry, SamPredictor
+    except ImportError as e:
+        print(f"Error: {e}")
+        print("Install with: pip install torch torchvision segment-anything")
+        return None, None
+
+    # Path to SAM checkpoint
+    SAM_CKPT = model_dir / "checkpoints" / "sam_vit_b_01ec64.pth"
+    
+    if not SAM_CKPT.exists():
+        print(f"Checkpoint not found: {SAM_CKPT}")
+        print("\nDownload from: https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth")
+        SAM_CKPT.parent.mkdir(parents=True, exist_ok=True)
+        return None, None
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    sam = sam_model_registry["vit_b"](checkpoint=str(SAM_CKPT))
+    sam.to(device=device)
+    
+    predictor = SamPredictor(sam)
+    
+    # Convert to RGB uint8 if needed
+    if roi_rgb.dtype != np.uint8:
+        roi_rgb_uint8 = (roi_rgb * 255).astype(np.uint8)
+    else:
+        roi_rgb_uint8 = roi_rgb
+    
+    predictor.set_image(roi_rgb_uint8)
+    
+    # Create box prompt for entire ROI with small margin
+    h, w = roi_rgb.shape[:2]
+    margin = 5
+    box_prompt = np.array([margin, margin, w - margin, h - margin])
+    
+    # Generate masks with box prompt
+    masks, scores, logits = predictor.predict(
+        box=box_prompt,
+        multimask_output=True  # Get 3 mask candidates
+    )
+    
+    print(f"SAM box prompt: Generated {len(masks)} candidate masks")
+    print(f"Scores: {scores}")
+    
+    # Score each mask based on:
+    # 1. Area in ROI
+    # 2. Centroid distance from ROI center
+    # 3. Penalty for touching ROI borders
+    h, w = roi_rgb.shape[:2]
+    roi_center_x, roi_center_y = w / 2, h / 2
+    roi_area = h * w
+    
+    best_idx = -1
+    best_score = -np.inf
+    
+    mask_scores = []
+    for i, mask in enumerate(masks):
+        # Area score (normalized)
+        area_in_roi = np.sum(mask)
+        area_score = area_in_roi / roi_area
+        
+        # Centroid score
+        if np.sum(mask) > 0:
+            y_coords, x_coords = np.where(mask)
+            centroid_x = np.mean(x_coords)
+            centroid_y = np.mean(y_coords)
+            dist_to_center = np.sqrt((centroid_x - roi_center_x)**2 + (centroid_y - roi_center_y)**2)
+            max_dist = np.sqrt(w**2 + h**2) / 2
+            centroid_score = 1 - (dist_to_center / max_dist)
+        else:
+            centroid_score = 0
+        
+        # Border penalty (if mask touches ROI edges)
+        border_penalty = 0
+        if np.any(mask[0, :]) or np.any(mask[-1, :]) or \
+           np.any(mask[:, 0]) or np.any(mask[:, -1]):
+            border_penalty = 0.2
+        
+        # Combined score
+        combined = scores[i] * 0.4 + area_score * 0.3 + centroid_score * 0.3 - border_penalty
+        mask_scores.append(combined)
+        
+        if combined > best_score:
+            best_score = combined
+            best_idx = i
+    
+    print(f"Combined scores: {mask_scores}")
+    print(f"Selected mask {best_idx} with score {best_score:.3f}")
+    
+    # Get best mask
+    best_mask = masks[best_idx].astype(np.uint8) * 255
+    
+    # Keep only largest connected component
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(best_mask, connectivity=8)
+    if num_labels > 1:
+        largest_component = 1 + np.argmax(stats[1:, cv2.CC_STAT_AREA])
+        mask_largest = (labels == largest_component).astype(np.uint8) * 255
+    else:
+        mask_largest = best_mask
+    
+    # Light morphological smoothing
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    mask_final = cv2.morphologyEx(mask_largest, cv2.MORPH_CLOSE, kernel, iterations=1)
+    
+    # Visualization
+    if show_steps:
+        vis_candidates = []
+        for i, mask in enumerate(masks):
+            vis = overlay_mask(roi_rgb_uint8, mask.astype(bool), alpha=0.4)
+            # cv2.putText(vis, f"Score: {mask_scores[i]:.3f}", (10, 30), 
+            #            cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 0), 2)
+            vis_candidates.append(vis)
+        
+        vis_final = overlay_mask(roi_rgb_uint8, mask_final.astype(bool), alpha=0.4)
+        
+        show_image(
+            [roi_rgb_uint8] + vis_candidates + [vis_final],
+            row_plot=2,
+            titles=[
+                "Input ROI",
+                f"Candidate 1 (SAM score: {scores[0]:.3f})",
+                f"Candidate 2 (SAM score: {scores[1]:.3f})",
+                f"Candidate 3 (SAM score: {scores[2]:.3f})",
+                f"Selected & refined (best combined score)"
+            ]
+        )
+    
+    return mask_final, overlay_mask(roi_rgb_uint8, mask_final.astype(bool), alpha=0.4)
+
+
+def watershed_roi_segmentation(roi_rgb, distance_threshold=0.3, show_steps=True):
+    """
+    Watershed segmentation within ROI: Use distance transform for seeds, select best component.
+    
+    Args:
+        roi_rgb: ROI RGB image (extracted region)
+        distance_threshold: Threshold multiplier for distance transform (0.1-0.5, default=0.3)
+        show_steps: Whether to show intermediate visualization (default=True)
+    
+    Returns:
+        mask: Binary mask (0/255) of the selected object within ROI
+        final_vis: Visualization with mask overlay
+    """
+    roi_gray = cv2.cvtColor(roi_rgb, cv2.COLOR_RGB2GRAY)
+    
+    # Otsu thresholding
+    _, thresh = cv2.threshold(roi_gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    
+    # Morphological opening to remove noise
+    kernel = np.ones((3, 3), np.uint8)
+    opening = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel, iterations=2)
+    
+    # Sure background (dilate)
+    sure_bg = cv2.dilate(opening, kernel, iterations=3)
+    
+    # Sure foreground via distance transform
+    dist_transform = cv2.distanceTransform(opening, cv2.DIST_L2, 5)
+    _, sure_fg = cv2.threshold(dist_transform, distance_threshold * dist_transform.max(), 255, 0)
+    sure_fg = sure_fg.astype(np.uint8)
+    
+    # Unknown region
+    unknown = cv2.subtract(sure_bg, sure_fg)
+    
+    # Marker labeling
+    num_labels, markers = cv2.connectedComponents(sure_fg)
+    markers = markers + 1  # Add 1 so background is not 0 but 1
+    markers[unknown == 255] = 0  # Mark unknown region as 0
+    
+    # Watershed
+    roi_bgr = cv2.cvtColor(roi_rgb, cv2.COLOR_RGB2BGR)
+    markers_ws = cv2.watershed(roi_bgr, markers.copy())
+    
+    print(f"Watershed: Found {num_labels} initial components")
+    
+    # Score each component (exclude background=1 and boundary=-1)
+    roi_h, roi_w = roi_rgb.shape[:2]
+    roi_center_y, roi_center_x = roi_h / 2, roi_w / 2
+    
+    best_component = -1
+    best_score = -np.inf
+    
+    component_scores = []
+    for label in range(2, num_labels + 1):  # Start from 2 (1 is background)
+        component_mask = (markers_ws == label)
+        
+        # Area score
+        area = np.sum(component_mask)
+        area_score = area / (roi_h * roi_w)
+        
+        # Centroid distance score
+        if area > 0:
+            y_coords, x_coords = np.where(component_mask)
+            centroid_y = np.mean(y_coords)
+            centroid_x = np.mean(x_coords)
+            dist_to_center = np.sqrt((centroid_x - roi_center_x)**2 + (centroid_y - roi_center_y)**2)
+            max_dist = np.sqrt(roi_w**2 + roi_h**2) / 2
+            centroid_score = 1 - (dist_to_center / max_dist)
+        else:
+            centroid_score = 0
+        
+        # Combined score
+        combined = area_score * 0.6 + centroid_score * 0.4
+        component_scores.append((label, combined, area))
+        
+        if combined > best_score:
+            best_score = combined
+            best_component = label
+    
+    print(f"Component scores: {[(l, f'{s:.3f}') for l, s, _ in component_scores]}")
+    print(f"Selected component {best_component} with score {best_score:.3f}")
+    
+    # Create mask for best component
+    if best_component > 0:
+        roi_mask = (markers_ws == best_component).astype(np.uint8) * 255
+    else:
+        roi_mask = np.zeros((roi_h, roi_w), dtype=np.uint8)
+    
+    # Morphological cleanup
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    mask_final = cv2.morphologyEx(roi_mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+    mask_final = cv2.morphologyEx(mask_final, cv2.MORPH_OPEN, kernel, iterations=1)
+    
+    # Visualization
+    if show_steps:
+        # Watershed boundaries visualization
+        vis_watershed = roi_rgb.copy()
+        vis_watershed[markers_ws == -1] = [255, 0, 0]  # Red boundaries
+        
+        # Distance transform normalized for display
+        dist_vis = (dist_transform / dist_transform.max() * 255).astype(np.uint8)
+        
+        # Final mask overlay
+        vis_final = overlay_mask(roi_rgb, mask_final.astype(bool), alpha=0.4)
+        
+        show_image(
+            [roi_rgb, thresh, opening, dist_vis, sure_fg, vis_watershed, vis_final],
+            row_plot=2,
+            titles=[
+                "ROI input",
+                "Otsu threshold",
+                "Opening (noise removal)",
+                "Distance transform",
+                f"Sure FG (thresh={distance_threshold})",
+                "Watershed boundaries",
+                "Final selected component"
+            ]
+        )
+    
+    return mask_final, overlay_mask(roi_rgb, mask_final.astype(bool), alpha=0.4)
+
+
 if __name__ == "__main__":
     
-    bgr, gray, rgb = load_image("IMG_006.jpeg")
+    bgr, gray, rgb = load_image("IMG_004.jpeg")
 
     (rect_x1, rect_y1, rect_x2, rect_y2), roi_rgb = select_roi_on_rgb(rgb)
     print(f"Selected rectangle: ({rect_x1}, {rect_y1}) to ({rect_x2}, {rect_y2})")
@@ -483,6 +941,22 @@ if __name__ == "__main__":
         sharpen = unsharp_masking(roi_gray)
         corners = detect_corners_ShiTomasi(sharpen, max_corner=30)
 
+        # seg_start(roi_rgb)
+        # SAM_segmentation(roi_rgb)
+
+        # ========== NEW SEGMENTATION METHODS ==========
+        # Uncomment to try different segmentation approaches:
+        
+        # 1) GrabCut segmentation (foreground/background separation)
+        mask_grabcut, vis_grabcut = grabcut_segmentation(roi_rgb, iterations=5, show_steps=True)
+        
+        # 2) SAM with box prompt (automatic mask selection)
+        mask_sam_box, vis_sam_box = sam_box_prompt_segmentation(roi_rgb, show_steps=True)
+        
+        # 3) Watershed segmentation (distance transform seeds)
+        mask_watershed, vis_watershed = watershed_roi_segmentation(roi_rgb, distance_threshold=0.3, show_steps=True)
+        # ==============================================
+
         # sharp = custom_kernel(roi_gray)
         # corners = detect_corners_ShiTomasi(sharp, max_corner=30)
 
@@ -504,7 +978,7 @@ if __name__ == "__main__":
         rgb_debug = debug_draw_corners(rgb.copy(), global_points)
         show_image([rgb_debug], titles=["Corners debug"], row_plot=1)
 
-        mask, blurred_full = create_blurred_mask(rgb, global_points, pixelation_strength=5, bit_depth=3, show_histogram=False)
+        mask, blurred_full = create_blurred_mask(rgb, global_points, pixelation_strength=13, bit_depth=5, show_histogram=True, verbose=True)
         # mask, blurred_full = mean_blur(gray, rgb, global_points)
 
         result = rgb.copy()
