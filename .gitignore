@@ -1,26 +1,2 @@
-# Python virtual environment
-.venv/
-venv/
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-
-# Model checkpoints (too large for GitHub)
+# Model checkpoints - too large for GitHub
 model/checkpoints/*.pth
-model/checkpoints/*.pt
-model/checkpoints/*.ckpt
-
-# Jupyter Notebook
-.ipynb_checkpoints/
-
-# IDE
-.vscode/
-.idea/
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Output files
-*.log
