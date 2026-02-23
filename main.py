@@ -18,6 +18,7 @@ import scipy.ndimage as ndi
 
 script_dir = Path(__file__).resolve().parent
 images_dir = script_dir/"IMG"
+video_dir = script_dir/"VID"
 model_dir = script_dir/"model"
 rect_start = None
 rect_end = None
@@ -45,6 +46,76 @@ def load_image(name: str):
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
     rgb  = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
     return bgr, gray, rgb
+
+
+def load_video(name: str):
+    """
+    Load a video file and return a VideoCapture object with metadata.
+    
+    Args:
+        name: Video filename (e.g., "my_video.mp4")
+    
+    Returns:
+        cap: cv2.VideoCapture object
+        metadata: dict with 'fps', 'width', 'height', 'frame_count', 'duration'
+    """
+    path = video_dir / name
+    
+    if not path.exists():
+        raise FileNotFoundError(f"Video not found: {path}")
+    
+    # Open video file
+    cap = cv2.VideoCapture(str(path))
+    
+    if not cap.isOpened():
+        raise IOError(f"Failed to open video: {path}")
+    
+    # Extract metadata
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    duration = frame_count / fps if fps > 0 else 0
+    
+    metadata = {
+        'fps': fps,
+        'width': width,
+        'height': height,
+        'frame_count': frame_count,
+        'duration': duration
+    }
+    
+    print(f"Video loaded: {name}")
+    print(f"  Resolution: {width}x{height}")
+    print(f"  FPS: {fps:.2f}")
+    print(f"  Frames: {frame_count}")
+    print(f"  Duration: {duration:.2f} seconds")
+    
+    return cap, metadata
+
+
+def read_video_frame(cap):
+    """
+    Read next frame from video.
+    
+    Args:
+        cap: cv2.VideoCapture object
+    
+    Returns:
+        success: Boolean indicating if frame was read successfully
+        bgr: Frame in BGR format (or None if failed)
+        gray: Frame in grayscale (or None if failed)
+        rgb: Frame in RGB format (or None if failed)
+    """
+    ret, bgr = cap.read()
+    
+    if not ret or bgr is None:
+        return False, None, None, None
+    
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+    
+    return True, bgr, gray, rgb
 
 
 def select_roi_on_rgb(rgb, window_width=1000, window_height=600):
@@ -118,6 +189,109 @@ def select_roi_on_rgb(rgb, window_width=1000, window_height=600):
     roi_rgb = rgb[orig_y1:orig_y2, orig_x1:orig_x2]
 
     return (orig_x1, orig_y1, orig_x2, orig_y2), roi_rgb
+
+
+def select_mode():
+    """
+    Prompt user to select between image and video processing modes.
+    
+    Returns:
+        mode: 'image' or 'video'
+    """
+    print("\n" + "="*60)
+    print("  IMAGE/VIDEO ANONYMIZATION TOOL")
+    print("="*60)
+    print("\nPlease select a processing mode:\n")
+    print("  1. Image mode - Process a single image")
+    print("  2. Video mode - Process a video with object tracking")
+    print()
+    
+    while True:
+        choice = input("Enter your choice (1 or 2): ").strip()
+        if choice == '1':
+            return 'image'
+        elif choice == '2':
+            return 'video'
+        else:
+            print("Invalid choice. Please enter 1 or 2.")
+
+
+def select_tracker():
+    """
+    Prompt user to select tracking method for video processing.
+    
+    Returns:
+        tracker: Instantiated MaskTracker (FlowWarpTracker or KLTTracker)
+    """
+    print("\n" + "="*60)
+    print("  SELECT TRACKING METHOD")
+    print("="*60)
+    print("\nAvailable tracking methods:\n")
+    print("  1. Dense Optical Flow - Pixel-wise warping (Farneback algorithm)")
+    print("     • More flexible for deformable objects")
+    print("     • Requires conservative morphology to prevent bleeding")
+    print()
+    print("  2. KLT Feature Tracking - Global transform (feature points)")
+    print("     • More stable for rigid/semi-rigid objects")
+    print("     • Warps entire mask as one unit, less degradation")
+    print()
+    
+    while True:
+        choice = input("Enter your choice (1 or 2): ").strip()
+        if choice == '1':
+            print("\nUsing FlowWarpTracker (Dense Optical Flow)")
+            return FlowWarpTracker(
+                roi_margin=30,
+                min_mask_area=300,
+                morph_kernel_size=5,
+                morph_close_iterations=2,
+                morph_open_iterations=1
+            )
+        elif choice == '2':
+            print("\nUsing KLTTracker (Feature Point Tracking)")
+            return KLTTracker(
+                max_points=150,
+                quality_level=0.01,
+                min_distance=10,
+                reinit_threshold=0.3,
+                refine_kernel_size=5,
+                refine_iterations=1
+            )
+        else:
+            print("Invalid choice. Please enter 1 or 2.")
+
+
+def select_segmentation_method():
+    """
+    Prompt user to select initial segmentation method for first frame.
+    
+    Returns:
+        method: 'sam' or 'corners'
+    """
+    print("\n" + "="*60)
+    print("  SELECT SEGMENTATION METHOD")
+    print("="*60)
+    print("\nChoose initial mask generation method:\n")
+    print("  1. SAM (Segment Anything Model)")
+    print("     • Deep learning segmentation")
+    print("     • High quality object boundaries")
+    print("     • Requires SAM checkpoint")
+    print()
+    print("  2. Corner Detection (Shi-Tomasi) + Convex Hull")
+    print("     • Feature point detection")
+    print("     • Fast and lightweight")
+    print("     • Good for well-defined objects")
+    print()
+    
+    while True:
+        choice = input("Enter your choice (1 or 2): ").strip()
+        if choice == '1':
+            return 'sam'
+        elif choice == '2':
+            return 'corners'
+        else:
+            print("Invalid choice. Please enter 1 or 2.")
+
 
 ###----------------------------------- Helper funcations ----------------------------------------  
 
@@ -631,6 +805,814 @@ def watershed_roi_segmentation(roi_rgb, distance_threshold=0.3, show_steps=True)
 
 
 
+###----------------------------------- Video Tracking Functions -------------------------------
+
+class MaskTracker:
+    """
+    Base class for mask tracking across video frames.
+    
+    All trackers follow the same interface:
+    - init(frame, mask): Initialize tracking from first frame
+    - update(prev_frame, curr_frame, prev_mask): Track mask to current frame
+    """
+    
+    def init(self, frame, mask):
+        """
+        Initialize tracker with first frame and mask.
+        
+        Args:
+            frame: First frame (grayscale uint8)
+            mask: Initial binary mask (0/255 uint8)
+        """
+        raise NotImplementedError
+    
+    def update(self, prev_frame, curr_frame, prev_mask):
+        """
+        Update mask from previous frame to current frame.
+        
+        Args:
+            prev_frame: Previous frame (grayscale uint8)
+            curr_frame: Current frame (grayscale uint8)
+            prev_mask: Previous binary mask (0/255 uint8)
+        
+        Returns:
+            curr_mask: Updated binary mask (0/255 uint8)
+            stats: Dictionary with tracking metrics
+        """
+        raise NotImplementedError
+    
+    def get_name(self):
+        """Return tracker name for logging."""
+        return self.__class__.__name__
+
+
+class KLTTracker(MaskTracker):
+    """
+    Track mask using KLT (Kanade-Lucas-Tomasi) feature point tracking.
+    
+    Tracks a sparse set of feature points on the object, estimates a global
+    similarity transform (translation + rotation + uniform scale), and warps
+    the entire mask as one unit. More stable than dense flow for rigid objects.
+    """
+    
+    def __init__(self, 
+                 max_points=150,
+                 quality_level=0.01,
+                 min_distance=10,
+                 reinit_threshold=0.3,
+                 refine_kernel_size=5,
+                 refine_iterations=1):
+        """
+        Args:
+            max_points: Maximum feature points to track
+            quality_level: Quality threshold for goodFeaturesToTrack (0-1)
+            min_distance: Minimum distance between feature points (pixels)
+            reinit_threshold: Reinitialize when points drop below this fraction
+            refine_kernel_size: Morphology kernel size for cleanup
+            refine_iterations: Morphology iterations (close+open)
+        """
+        self.max_points = max_points
+        self.quality_level = quality_level
+        self.min_distance = min_distance
+        self.reinit_threshold = reinit_threshold
+        self.refine_kernel_size = refine_kernel_size
+        self.refine_iterations = refine_iterations
+        
+        self.initial_points = None
+        self.prev_points = None
+        self.num_initial_points = 0
+        
+        # KLT parameters
+        self.lk_params = dict(
+            winSize=(21, 21),
+            maxLevel=3,
+            criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01)
+        )
+    
+    def init(self, frame, mask):
+        """Initialize feature points inside the mask."""
+        self._detect_points(frame, mask)
+        self.num_initial_points = len(self.prev_points) if self.prev_points is not None else 0
+    
+    def _detect_points(self, frame, mask):
+        """Detect feature points inside the mask region."""
+        # Detect features only inside mask
+        points = cv2.goodFeaturesToTrack(
+            frame,
+            maxCorners=self.max_points,
+            qualityLevel=self.quality_level,
+            minDistance=self.min_distance,
+            mask=mask
+        )
+        
+        if points is not None and len(points) > 0:
+            self.prev_points = points
+            if self.initial_points is None:
+                self.initial_points = points.copy()
+        else:
+            self.prev_points = None
+    
+    def update(self, prev_frame, curr_frame, prev_mask):
+        """Track points with KLT and warp mask with estimated transform."""
+        stats = {
+            'num_points_prev': 0,
+            'num_points_tracked': 0,
+            'num_points_inliers': 0,
+            'transform_estimated': False,
+            'reinitialized': False
+        }
+        
+        # Check if we have points to track
+        if self.prev_points is None or len(self.prev_points) < 4:
+            # Need at least 4 points for affine estimation
+            self._detect_points(curr_frame, prev_mask)
+            stats['reinitialized'] = True
+            stats['num_points_prev'] = 0
+            return prev_mask, stats  # Return previous mask as fallback
+        
+        stats['num_points_prev'] = len(self.prev_points)
+        
+        # Track points with KLT
+        curr_points, status, err = cv2.calcOpticalFlowPyrLK(
+            prev_frame, curr_frame, self.prev_points, None, **self.lk_params
+        )
+        
+        # Filter valid points
+        if status is None:
+            self._detect_points(curr_frame, prev_mask)
+            stats['reinitialized'] = True
+            return prev_mask, stats
+        
+        good_prev = self.prev_points[status.ravel() == 1]
+        good_curr = curr_points[status.ravel() == 1]
+        
+        stats['num_points_tracked'] = len(good_curr)
+        
+        # Check if we need to reinitialize
+        min_points_threshold = max(4, int(self.num_initial_points * self.reinit_threshold))
+        if len(good_curr) < min_points_threshold:
+            # Reinitialize points on current frame
+            self._detect_points(curr_frame, prev_mask)
+            stats['reinitialized'] = True
+            return prev_mask, stats  # Return previous mask as fallback
+        
+        # Estimate similarity transform (translation + rotation + uniform scale)
+        transform_matrix, inliers = cv2.estimateAffinePartial2D(
+            good_prev, good_curr, method=cv2.RANSAC, ransacReprojThreshold=3.0
+        )
+        
+        if transform_matrix is None:
+            # Transform estimation failed, reinitialize
+            self._detect_points(curr_frame, prev_mask)
+            stats['reinitialized'] = True
+            return prev_mask, stats
+        
+        stats['transform_estimated'] = True
+        stats['num_points_inliers'] = np.sum(inliers.ravel()) if inliers is not None else len(good_curr)
+        
+        # Warp mask with estimated transform
+        h, w = prev_mask.shape
+        mask_warped = cv2.warpAffine(
+            prev_mask, transform_matrix, (w, h),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0
+        )
+        
+        # Threshold to binary
+        mask_warped = (mask_warped > 127).astype(np.uint8) * 255
+        
+        # Light morphological cleanup
+        if self.refine_iterations > 0:
+            kernel = cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE, 
+                (self.refine_kernel_size, self.refine_kernel_size)
+            )
+            mask_warped = cv2.morphologyEx(
+                mask_warped, cv2.MORPH_CLOSE, kernel, 
+                iterations=self.refine_iterations
+            )
+            mask_warped = cv2.morphologyEx(
+                mask_warped, cv2.MORPH_OPEN, kernel, 
+                iterations=self.refine_iterations
+            )
+        
+        # Update points for next frame (use inliers if available)
+        if inliers is not None:
+            self.prev_points = good_curr[inliers.ravel() == 1].reshape(-1, 1, 2)
+        else:
+            self.prev_points = good_curr.reshape(-1, 1, 2)
+        
+        return mask_warped, stats
+
+
+class FlowWarpTracker(MaskTracker):
+    """
+    Track mask using dense optical flow + pixel-wise warping.
+    
+    Computes dense Farneback optical flow in an ROI around the mask,
+    warps each pixel independently, then refines with morphology and
+    component selection.
+    """
+    
+    def __init__(self,
+                 roi_margin=30,
+                 min_mask_area=300,
+                 morph_kernel_size=5,
+                 morph_close_iterations=2,
+                 morph_open_iterations=1):
+        """
+        Args:
+            roi_margin: Pixels to expand bbox for flow computation
+            min_mask_area: Minimum mask area threshold (pixels)
+            morph_kernel_size: Morphology kernel size
+            morph_close_iterations: Closing iterations
+            morph_open_iterations: Opening iterations
+        """
+        self.roi_margin = roi_margin
+        self.min_mask_area = min_mask_area
+        self.morph_kernel_size = morph_kernel_size
+        self.morph_close_iterations = morph_close_iterations
+        self.morph_open_iterations = morph_open_iterations
+        
+        self.prev_bbox = None
+        self.prev_centroid = None
+    
+    def init(self, frame, mask):
+        """Initialize with first frame and mask."""
+        self.prev_bbox = get_mask_bbox(mask)
+        if np.sum(mask > 0) > 0:
+            y_coords, x_coords = np.where(mask > 0)
+            self.prev_centroid = (np.mean(x_coords), np.mean(y_coords))
+        else:
+            self.prev_centroid = None
+    
+    def update(self, prev_frame, curr_frame, prev_mask):
+        """Track mask using optical flow."""
+        stats = {
+            'flow_mean': 0.0,
+            'flow_max': 0.0,
+            'roi_used': self.prev_bbox
+        }
+        
+        # Get bbox for ROI
+        if self.prev_bbox is None:
+            self.prev_bbox = get_mask_bbox(prev_mask)
+            if self.prev_bbox is None:
+                return prev_mask, stats  # No mask to track
+        
+        # Compute optical flow in ROI
+        flow, flow_roi_bbox = compute_optical_flow_roi(
+            prev_frame, curr_frame, self.prev_bbox, margin=self.roi_margin
+        )
+        
+        stats['roi_used'] = flow_roi_bbox
+        
+        # Compute flow statistics in ROI
+        fx1, fy1, fx2, fy2 = flow_roi_bbox
+        flow_roi = flow[fy1:fy2, fx1:fx2]
+        if flow_roi.size > 0:
+            flow_mag = np.sqrt(flow_roi[..., 0]**2 + flow_roi[..., 1]**2)
+            stats['flow_mean'] = float(np.mean(flow_mag))
+            stats['flow_max'] = float(np.max(flow_mag))
+        
+        # Warp mask with flow
+        mask_warped = warp_mask_with_flow(prev_mask, flow)
+        
+        # Create ROI constraint to prevent background bleeding
+        h, w = prev_mask.shape
+        roi_constrain = (
+            max(0, fx1 - self.roi_margin),
+            max(0, fy1 - self.roi_margin),
+            min(w, fx2 + self.roi_margin),
+            min(h, fy2 + self.roi_margin)
+        )
+        
+        # Refine mask
+        mask_refined = refine_warped_mask(
+            mask_warped,
+            min_area=self.min_mask_area,
+            kernel_size=self.morph_kernel_size,
+            close_iterations=self.morph_close_iterations,
+            open_iterations=self.morph_open_iterations,
+            prev_centroid=self.prev_centroid,
+            roi_bbox=roi_constrain
+        )
+        
+        # Update state for next frame
+        self.prev_bbox = get_mask_bbox(mask_refined)
+        if self.prev_bbox is None:
+            self.prev_bbox = self.prev_bbox  # Keep previous if current fails
+        
+        if np.sum(mask_refined > 0) > 0:
+            y_coords, x_coords = np.where(mask_refined > 0)
+            self.prev_centroid = (np.mean(x_coords), np.mean(y_coords))
+        
+        return mask_refined, stats
+
+
+
+def get_mask_bbox(mask):
+    """Get bounding box from binary mask."""
+    coords = np.where(mask > 0)
+    if len(coords[0]) == 0:
+        return None
+    y1, y2 = coords[0].min(), coords[0].max()
+    x1, x2 = coords[1].min(), coords[1].max()
+    return (x1, y1, x2, y2)
+
+
+def compute_optical_flow_roi(gray_prev, gray_curr, bbox_prev, margin=30):
+    """
+    Compute dense optical flow only within an expanded ROI around the previous mask.
+    
+    Args:
+        gray_prev: Previous frame (grayscale)
+        gray_curr: Current frame (grayscale)
+        bbox_prev: (x1, y1, x2, y2) bounding box of previous mask
+        margin: Pixels to expand bbox (for motion tolerance)
+    
+    Returns:
+        flow: Dense optical flow (H×W×2) with (dx, dy) per pixel
+        roi_bbox: Actual ROI used for flow computation
+    """
+    # Expand bbox by margin
+    x1, y1, x2, y2 = bbox_prev
+    h, w = gray_prev.shape
+    x1 = max(0, x1 - margin)
+    y1 = max(0, y1 - margin)
+    x2 = min(w, x2 + margin)
+    y2 = min(h, y2 + margin)
+    
+    # Extract ROI patches
+    roi_prev = gray_prev[y1:y2, x1:x2]
+    roi_curr = gray_curr[y1:y2, x1:x2]
+    
+    # Compute dense optical flow using Farneback
+    flow_roi = cv2.calcOpticalFlowFarneback(
+        roi_prev, roi_curr, None,
+        pyr_scale=0.5, levels=3, winsize=15,
+        iterations=3, poly_n=5, poly_sigma=1.2, flags=0
+    )
+    
+    # Create full-sized flow map (zero outside ROI)
+    flow = np.zeros((h, w, 2), dtype=np.float32)
+    flow[y1:y2, x1:x2] = flow_roi
+    
+    return flow, (x1, y1, x2, y2)
+
+
+def warp_mask_with_flow(mask_prev, flow):
+    """
+    Warp previous mask to current frame using optical flow.
+    
+    Args:
+        mask_prev: Binary mask from previous frame (0/255 uint8)
+        flow: Dense optical flow (H×W×2)
+    
+    Returns:
+        mask_warped: Warped mask (0/255 uint8)
+    """
+    h, w = mask_prev.shape
+    
+    # Create coordinate grid
+    y_grid, x_grid = np.meshgrid(np.arange(h), np.arange(w), indexing='ij')
+    
+    # Apply flow to get new coordinates
+    # Optical flow gives forward motion (where pixels moved TO)
+    # cv2.remap does backward warping (where to sample FROM)
+    # So we SUBTRACT flow to find source positions
+    x_new = x_grid - flow[..., 0]
+    y_new = y_grid - flow[..., 1]
+    
+    # Remap mask using bilinear interpolation
+    mask_warped = cv2.remap(
+        mask_prev.astype(np.float32),
+        x_new.astype(np.float32),
+        y_new.astype(np.float32),
+        interpolation=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=0
+    )
+    
+    # Threshold back to binary (handle interpolation artifacts)
+    mask_warped = (mask_warped > 127).astype(np.uint8) * 255
+    
+    return mask_warped
+
+
+def refine_warped_mask(mask_warped, min_area=300, kernel_size=5, close_iterations=2, open_iterations=1, 
+                       prev_centroid=None, roi_bbox=None):
+    """
+    Clean up warped mask: morphology + keep component closest to previous centroid.
+    
+    Args:
+        mask_warped: Warped binary mask (0/255)
+        min_area: Minimum area threshold (pixels)
+        kernel_size: Size of morphological kernel
+        close_iterations: Closing iterations (fewer = less aggressive, less bleeding)
+        open_iterations: Opening iterations
+        prev_centroid: (x, y) centroid from previous frame - selects closest component
+        roi_bbox: (x1, y1, x2, y2) ROI to constrain mask (prevents background smear)
+    
+    Returns:
+        mask_refined: Cleaned mask (0/255)
+    """
+    # Optional: Constrain to ROI to prevent background bleeding
+    if roi_bbox is not None:
+        x1, y1, x2, y2 = roi_bbox
+        # Create ROI mask
+        roi_mask = np.zeros_like(mask_warped)
+        roi_mask[y1:y2, x1:x2] = 255
+        # Zero out everything outside ROI
+        mask_warped = cv2.bitwise_and(mask_warped, roi_mask)
+    
+    # Conservative morphological operations
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+    # Moderate closing: fills small holes without excessive bleeding
+    mask_clean = cv2.morphologyEx(mask_warped, cv2.MORPH_CLOSE, kernel, iterations=close_iterations)
+    # Opening: removes small noise
+    mask_clean = cv2.morphologyEx(mask_clean, cv2.MORPH_OPEN, kernel, iterations=open_iterations)
+    
+    # Keep only largest connected component
+    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
+        mask_clean, connectivity=8
+    )
+    
+    if num_labels <= 1:  # No foreground found
+        return np.zeros_like(mask_warped)
+    
+    # Filter by minimum area first
+    valid_components = []
+    for i in range(1, num_labels):  # Skip background (0)
+        area = stats[i, cv2.CC_STAT_AREA]
+        if area >= min_area:
+            valid_components.append(i)
+    
+    if len(valid_components) == 0:
+        return np.zeros_like(mask_warped)
+    
+    # Select best component: closest to previous centroid if available, else largest
+    if prev_centroid is not None and len(valid_components) > 1:
+        prev_cx, prev_cy = prev_centroid
+        # Find component with centroid closest to previous centroid
+        best_idx = -1
+        min_dist = float('inf')
+        for idx in valid_components:
+            curr_cy, curr_cx = centroids[idx]  # centroids is (y, x) format
+            dist = np.sqrt((curr_cx - prev_cx)**2 + (curr_cy - prev_cy)**2)
+            if dist < min_dist:
+                min_dist = dist
+                best_idx = idx
+    else:
+        # Fallback: pick largest component
+        best_idx = max(valid_components, key=lambda i: stats[i, cv2.CC_STAT_AREA])
+    
+    mask_refined = (labels == best_idx).astype(np.uint8) * 255
+    
+    return mask_refined
+
+
+def check_tracking_quality(mask_prev, mask_curr, area_ratio_range=(0.5, 2.0), centroid_shift_threshold=50):
+    """
+    Check if tracking is stable using area and centroid metrics.
+    
+    Args:
+        mask_prev: Previous mask (0/255)
+        mask_curr: Current mask (0/255)
+        area_ratio_range: (min, max) acceptable area change ratio
+        centroid_shift_threshold: Maximum acceptable centroid shift in pixels
+    
+    Returns:
+        is_good: Boolean, True if tracking is reliable
+        metrics: Dict with area_ratio, centroid_shift, and issue_types
+    """
+    area_prev = np.sum(mask_prev > 0)
+    area_curr = np.sum(mask_curr > 0)
+    
+    if area_prev == 0 or area_curr == 0:
+        return False, {
+            'area_ratio': 0 if area_prev == 0 else float('inf'),
+            'centroid_shift': float('inf'),
+            'issue_types': ['empty_mask']
+        }
+    
+    # Area change ratio
+    area_ratio = area_curr / area_prev
+    
+    # Centroid shift
+    y_prev, x_prev = np.mean(np.where(mask_prev > 0), axis=1)
+    y_curr, x_curr = np.mean(np.where(mask_curr > 0), axis=1)
+    centroid_shift = np.sqrt((x_curr - x_prev)**2 + (y_curr - y_prev)**2)
+    
+    # Check thresholds
+    area_ok = area_ratio_range[0] <= area_ratio <= area_ratio_range[1]
+    centroid_ok = centroid_shift < centroid_shift_threshold
+    
+    # Identify specific issues
+    issue_types = []
+    if not area_ok:
+        issue_types.append('area_anomaly')
+    if not centroid_ok:
+        issue_types.append('centroid_anomaly')
+    
+    is_good = area_ok and centroid_ok
+    
+    metrics = {
+        'area_ratio': area_ratio,
+        'centroid_shift': centroid_shift,
+        'issue_types': issue_types
+    }
+    
+    return is_good, metrics
+
+
+def process_video_with_sam_tracker(
+    video_name,
+    output_name,
+    tracker,
+    pixelation_strength=13,
+    bit_depth=5,
+    area_ratio_range=(0.5, 2.0),
+    centroid_shift_threshold=50,
+    progress_interval=30
+):
+    """
+    Video processing with modular tracker (Flow or KLT).
+    
+    Args:
+        video_name: Input video filename in VID/ folder
+        output_name: Output video filename
+        tracker: MaskTracker instance (FlowWarpTracker or KLTTracker)
+        pixelation_strength: Pixelation strength for blur (5-20)
+        bit_depth: Color quantization depth (3-6)
+        area_ratio_range: (min, max) acceptable area change ratio
+        centroid_shift_threshold: Max centroid shift in pixels
+        progress_interval: Print progress every N frames
+    
+    Returns:
+        summary: Dict with processing statistics
+    """
+    import time
+    from datetime import datetime
+    
+    print(f"\n{'='*60}")
+    print(f"VIDEO PROCESSING: {video_name}")
+    print(f"Tracker: {tracker.get_name()}")
+    print(f"{'='*60}\n")
+    
+    start_time = time.time()
+    
+    # Load video
+    cap, metadata = load_video(video_name)
+    fps = metadata['fps']
+    width = metadata['width']
+    height = metadata['height']
+    total_frames = metadata['frame_count']
+    
+    # Setup video writer
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    output_path = video_dir / output_name
+    writer = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))
+    
+    # === FRAME 1: Initialize mask with SAM ===
+    print("\n[INITIALIZATION] Processing first frame...\n")
+    success, bgr, gray_prev, rgb = read_video_frame(cap)
+    if not success:
+        print("ERROR: Failed to read first frame")
+        cap.release()
+        writer.release()
+        return None
+    
+    # ROI selection
+    roi_coords, roi_rgb = select_roi_on_rgb(rgb)
+    if roi_rgb is None:
+        print("ERROR: No ROI selected")
+        cap.release()
+        writer.release()
+        return None
+    
+    rect_x1, rect_y1, rect_x2, rect_y2 = roi_coords
+    
+    # Generate initial mask based on selected method
+    segmentation_method = select_segmentation_method()
+    
+    if segmentation_method == 'sam':
+        print("Running SAM segmentation on first frame...")
+        mask_roi, _ = sam_box_prompt_segmentation(roi_rgb, show_steps=False)
+        if mask_roi is None:
+            print("ERROR: SAM segmentation failed")
+            cap.release()
+            writer.release()
+            return None
+        mask_prev = convert_roi_mask_to_global(mask_roi, roi_coords, rgb.shape)
+    
+    elif segmentation_method == 'corners':
+        print("Running corner detection on first frame...")
+        # Convert ROI to grayscale
+        roi_gray = cv2.cvtColor(roi_rgb, cv2.COLOR_RGB2GRAY)
+        
+        # Detect corners in ROI
+        corners = detect_corners_ShiTomasi(roi_gray, max_corner=150)
+        if corners is None:
+            print("ERROR: Corner detection failed - no corners found")
+            cap.release()
+            writer.release()
+            return None
+        
+        print(f"Detected {len(corners)} corners in ROI")
+        # Translate to global coordinates
+        global_points = translate_corners_to_global(corners, rect_x1, rect_y1)
+        # Create mask from convex hull of points
+        mask_prev = create_mask_from_points(global_points, rgb.shape)
+    
+    else:
+        print(f"ERROR: Unknown segmentation method: {segmentation_method}")
+        cap.release()
+        writer.release()
+        return None
+    
+    if np.sum(mask_prev > 0) == 0:
+        print("ERROR: Initial mask is empty")
+        cap.release()
+        writer.release()
+        return None
+    
+    # Visualize initial mask on first frame
+    print("\nVisualizing initial mask...")
+    mask_visualization = _overlay_mask(rgb, mask_prev.astype(bool), alpha=0.4)
+    show_image([rgb, mask_visualization], row_plot=1, 
+               titles=["First Frame (Original)", f"Initial Mask ({segmentation_method.upper()})"])
+    
+    # Initialize tracker
+    tracker.init(gray_prev, mask_prev)
+    
+    bbox_init = get_mask_bbox(mask_prev)
+    print(f"Initial mask bbox: {bbox_init}")
+    print(f"Initial mask area: {np.sum(mask_prev > 0)} pixels")
+    
+    if np.sum(mask_prev > 0) > 0:
+        y_init, x_init = np.mean(np.where(mask_prev > 0), axis=1)
+        print(f"Initial centroid: ({x_init:.1f}, {y_init:.1f})\n")
+    
+    # Blur and write first frame
+    _, blurred = create_blurred_mask(rgb, mask_prev, pixelation_strength, bit_depth,
+                                     show_histogram=False, verbose=False)
+    writer.write(cv2.cvtColor(blurred, cv2.COLOR_RGB2BGR))
+    
+    print(f"Frame 1/{total_frames}: Initialized with SAM ✓\n")
+    print(f"{'='*60}")
+    print(f"[TRACKING] Processing remaining frames...\n")
+    
+    # === FRAMES 2+: Track mask ===
+    frame_idx = 2
+    anomaly_frames = []
+    all_area_ratios = []
+    all_centroid_shifts = []
+    frame_times = []
+    tracker_stats_log = []  # For tracker-specific diagnostics
+    
+    while True:
+        frame_start = time.time()
+        
+        success, bgr, gray_curr, rgb = read_video_frame(cap)
+        if not success:
+            break
+        
+        # Update mask with tracker
+        mask_curr, tracker_stats = tracker.update(gray_prev, gray_curr, mask_prev)
+        tracker_stats_log.append(tracker_stats)
+        
+        # Compute mask statistics
+        mask_curr_area = np.sum(mask_curr > 0)
+        if mask_curr_area > 0:
+            y_coords, x_coords = np.where(mask_curr > 0)
+            mask_curr_centroid = (np.mean(x_coords), np.mean(y_coords))
+        else:
+            mask_curr_centroid = (0, 0)
+        
+        # Quality check
+        is_good, metrics = check_tracking_quality(
+            mask_prev, mask_curr,
+            area_ratio_range=area_ratio_range,
+            centroid_shift_threshold=centroid_shift_threshold
+        )
+        
+        # Log metrics
+        all_area_ratios.append(metrics['area_ratio'])
+        all_centroid_shifts.append(metrics['centroid_shift'])
+        
+        # Check for KLT-specific issues
+        if isinstance(tracker, KLTTracker):
+            if tracker_stats.get('num_points_tracked', float('inf')) < 4:
+                metrics['issue_types'].append('too_few_points')
+                is_good = False
+        
+        if not is_good:
+            anomaly_frames.append((frame_idx, metrics))
+            issues_str = ', '.join(metrics['issue_types'])
+            print(f"  ⚠ Frame {frame_idx}/{total_frames}: Quality issue ({issues_str})")
+            print(f"     Area ratio: {metrics['area_ratio']:.3f}, Centroid shift: {metrics['centroid_shift']:.1f}px")
+        
+        # Blur and write frame
+        _, blurred = create_blurred_mask(rgb, mask_curr, pixelation_strength, bit_depth,
+                                         show_histogram=False, verbose=False)
+        writer.write(cv2.cvtColor(blurred, cv2.COLOR_RGB2BGR))
+        
+        # Update for next iteration
+        mask_prev = mask_curr
+        gray_prev = gray_curr
+        
+        frame_time = time.time() - frame_start
+        frame_times.append(frame_time)
+        
+        # Progress logging
+        if frame_idx % progress_interval == 0 or frame_idx <= 4:
+            avg_time = np.mean(frame_times[-progress_interval:]) if len(frame_times) >= progress_interval else np.mean(frame_times)
+            fps_processing = 1.0 / avg_time if avg_time > 0 else 0
+            print(f"  Frame {frame_idx}/{total_frames} (avg: {avg_time*1000:.1f}ms/frame, {fps_processing:.1f} FPS)")
+            print(f"    Mask area: {mask_curr_area}px, Centroid: ({mask_curr_centroid[0]:.1f}, {mask_curr_centroid[1]:.1f})")
+            
+            # Tracker-specific debug info
+            if isinstance(tracker, KLTTracker):
+                print(f"    KLT: {tracker_stats.get('num_points_tracked', 0)} points tracked" + 
+                      (f", reinit!" if tracker_stats.get('reinitialized') else ""))
+            elif isinstance(tracker, FlowWarpTracker):
+                print(f"    Flow: mean={tracker_stats.get('flow_mean', 0):.2f}px, max={tracker_stats.get('flow_max', 0):.2f}px")
+        
+        frame_idx += 1
+    
+    # Cleanup
+    cap.release()
+    writer.release()
+    cv2.destroyAllWindows()
+    
+    total_time = time.time() - start_time
+    frames_processed = frame_idx - 1
+    
+    # === FINAL SUMMARY ===
+    print(f"\n{'='*60}")
+    print(f"[SUMMARY] Video Processing Complete")
+    print(f"{'='*60}\n")
+    print(f"Output: {output_path}\n")
+    print(f"Processing Stats:")
+    print(f"  Frames: {frames_processed}/{total_frames}")
+    print(f"  Time: {total_time:.2f}s ({total_time/frames_processed*1000:.1f}ms/frame)")
+    print(f"  FPS: {frames_processed/total_time:.2f}\n")
+    
+    print(f"Tracking Quality:")
+    print(f"  Anomaly frames: {len(anomaly_frames)} ({len(anomaly_frames)/frames_processed*100:.1f}%)")
+    
+    if len(anomaly_frames) > 0:
+        area_issues = sum(1 for _, m in anomaly_frames if 'area_anomaly' in m['issue_types'])
+        centroid_issues = sum(1 for _, m in anomaly_frames if 'centroid_anomaly' in m['issue_types'])
+        point_issues = sum(1 for _, m in anomaly_frames if 'too_few_points' in m['issue_types'])
+        
+        print(f"  Area anomalies: {area_issues}")
+        print(f"  Centroid anomalies: {centroid_issues}")
+        if point_issues > 0:
+            print(f"  Point tracking issues: {point_issues}")
+    
+    # Tracker-specific statistics
+    if isinstance(tracker, KLTTracker):
+        reinit_count = sum(1 for s in tracker_stats_log if s.get('reinitialized', False))
+        avg_points = np.mean([s.get('num_points_tracked', 0) for s in tracker_stats_log if 'num_points_tracked' in s])
+        print(f"\nKLT Stats:")
+        print(f"  Reinitializations: {reinit_count}")
+        print(f"  Avg points tracked: {avg_points:.1f}")
+    elif isinstance(tracker, FlowWarpTracker):
+        flow_means = [s.get('flow_mean', 0) for s in tracker_stats_log if 'flow_mean' in s]
+        if flow_means:
+            print(f"\nFlow Stats:")
+            print(f"  Avg flow magnitude: {np.mean(flow_means):.2f}px")
+    
+    # Average quality metrics
+    valid_area_ratios = [r for r in all_area_ratios if r != 0 and r != float('inf')]
+    valid_centroid_shifts = [s for s in all_centroid_shifts if s != float('inf')]
+    
+    if valid_area_ratios:
+        print(f"\nQuality Metrics:")
+        print(f"  Avg area ratio: {np.mean(valid_area_ratios):.3f} ± {np.std(valid_area_ratios):.3f}")
+    if valid_centroid_shifts:
+        print(f"  Avg centroid shift: {np.mean(valid_centroid_shifts):.1f}px ± {np.std(valid_centroid_shifts):.1f}px")
+    
+    print(f"\n{'='*60}\n")
+    
+    summary = {
+        'tracker': tracker.get_name(),
+        'frames_processed': frames_processed,
+        'total_frames': total_frames,
+        'total_time': total_time,
+        'anomaly_count': len(anomaly_frames),
+        'anomaly_frames': anomaly_frames,
+        'avg_area_ratio': np.mean(valid_area_ratios) if valid_area_ratios else None,
+        'avg_centroid_shift': np.mean(valid_centroid_shifts) if valid_centroid_shifts else None,
+        'output_path': str(output_path)
+    }
+    
+    return summary
+
+
 ###----------------------------------- corner detection functions -------------------------------
 
 def detect_corners_ShiTomasi(gray, max_corner=150):
@@ -818,135 +1800,175 @@ def create_blurred_mask(rgb, mask, pixelation_strength=5, bit_depth=3, show_hist
 
 
 
-
-
 ###----------------------------------- Main - active the project ------------------------------------------
 
 if __name__ == "__main__":
     
-    ## Initial setup ##
-    bgr, gray, rgb = load_image("IMG_004.jpeg")
-
-    (rect_x1, rect_y1, rect_x2, rect_y2), roi_rgb = select_roi_on_rgb(rgb)
-    print(f"Selected rectangle: ({rect_x1}, {rect_y1}) to ({rect_x2}, {rect_y2})")
+    # Select processing mode
+    mode = select_mode()
     
-    if roi_rgb is not None:
-        show_image(roi_rgb, titles=["Selected ROI"], row_plot=1)
+    if mode == 'image':
+        print("\n[IMAGE MODE] Starting image processing...\n")
+        
+        ## Initial setup ##
+        bgr, gray, rgb = load_image("IMG_004.jpeg")
+
+        (rect_x1, rect_y1, rect_x2, rect_y2), roi_rgb = select_roi_on_rgb(rgb)
+        print(f"Selected rectangle: ({rect_x1}, {rect_y1}) to ({rect_x2}, {rect_y2})")
+        
+        if roi_rgb is not None:
+            show_image(roi_rgb, titles=["Selected ROI"], row_plot=1)
+        
+            roi_gray = cv2.cvtColor(roi_rgb, cv2.COLOR_RGB2GRAY)
+            
+            ### ---------------------------------------------------------------------------
+            ### first image processing functions ##
+
+            # # Binary than grey mask
+            # roi_gray_masked = binary_mask(roi_gray)
+            # corners = detect_corners_ShiTomasi(roi_gray_masked, max_corner=30)
+            # global_points = translate_corners_to_global(corners, rect_x1, rect_y1)
+            # rgb_debug = debug_draw_corners(rgb.copy(), global_points)
+            # show_image([rgb_debug], titles=["Binary Mask debug"], row_plot=1)
+            # mask = create_mask_from_points(global_points, rgb.shape)
+
+            # # Dilation 
+            # dilated = diliation(roi_gray)
+            # corners = detect_corners_ShiTomasi(dilated, max_corner=30)
+            # global_points = translate_corners_to_global(corners, rect_x1, rect_y1)
+            # rgb_debug = debug_draw_corners(rgb.copy(), global_points)
+            # show_image([rgb_debug], titles=["Dilation debug"], row_plot=1)
+            # mask = create_mask_from_points(global_points, rgb.shape)
+
+            # # Morphological gradient
+            # outer = Morphological_gradient(roi_gray)
+            # corners = detect_corners_ShiTomasi(outer, max_corner=30)
+            # global_points = translate_corners_to_global(corners, rect_x1, rect_y1)
+            # rgb_debug = debug_draw_corners(rgb.copy(), global_points)
+            # show_image([rgb_debug], titles=["Morphological Gradient debug"], row_plot=1)
+            # mask = create_mask_from_points(global_points, rgb.shape)
+
+            # # Apply CLAHE on grayscale image
+            # he_clahe = clahe(roi_gray)
+            # corners = detect_corners_ShiTomasi(he_clahe, max_corner=30)
+            # global_points = translate_corners_to_global(corners, rect_x1, rect_y1)
+            # rgb_debug = debug_draw_corners(rgb.copy(), global_points)
+            # show_image([rgb_debug], titles=["CLAHE debug"], row_plot=1)
+            # mask = create_mask_from_points(global_points, rgb.shape)
+
+            # # Unsharp masking (blur → subtract → sharpen)
+            # sharpen = unsharp_masking(roi_gray)
+            # corners = detect_corners_ShiTomasi(sharpen, max_corner=30)
+            # global_points = translate_corners_to_global(corners, rect_x1, rect_y1)
+            # rgb_debug = debug_draw_corners(rgb.copy(), global_points)
+            # show_image([rgb_debug], titles=["Unsharp Masking debug"], row_plot=1)
+            # mask = create_mask_from_points(global_points, rgb.shape)
+
+
+            ### ---------------------------------------------------------------------------
+            ## second image processing functions ##
+
+            # # Custom sharpening kernel
+            # sharp = custom_kernel(roi_gray)
+            # corners = detect_corners_ShiTomasi(sharp, max_corner=30)
+            # global_points = translate_corners_to_global(corners, rect_x1, rect_y1)
+            # rgb_debug = debug_draw_corners(rgb.copy(), global_points)
+            # show_image([rgb_debug], titles=["Custom Kernel debug"], row_plot=1)
+            # mask = create_mask_from_points(global_points, rgb.shape)
+
+            # # Sobel gradients (derivatives)
+            # sobel_mag = sobel(roi_gray)
+            # corners = detect_corners_ShiTomasi(sobel_mag, max_corner=30)
+            # global_points = translate_corners_to_global(corners, rect_x1, rect_y1)
+            # rgb_debug = debug_draw_corners(rgb.copy(), global_points)
+            # show_image([rgb_debug], titles=["Sobel debug"], row_plot=1)
+            # mask = create_mask_from_points(global_points, rgb.shape)
+
+            # # Laplacian (second derivative)
+            # lap = laplacian(roi_gray)
+            # corners = detect_corners_ShiTomasi(lap, max_corner=30)
+            # global_points = translate_corners_to_global(corners, rect_x1, rect_y1)
+            # rgb_debug = debug_draw_corners(rgb.copy(), global_points)
+            # show_image([rgb_debug], titles=["Laplacian debug"], row_plot=1)
+            # mask = create_mask_from_points(global_points, rgb.shape)
+
+            # # Canny (works on 8-bit)
+            # edges = canny(roi_gray)
+            # corners = detect_corners_ShiTomasi(edges, max_corner=30)
+            # global_points = translate_corners_to_global(corners, rect_x1, rect_y1)
+            # rgb_debug = debug_draw_corners(rgb.copy(), global_points)
+            # show_image([rgb_debug], titles=["Canny debug"], row_plot=1)
+            # mask = create_mask_from_points(global_points, rgb.shape)
+
+            ### ---------------------------------------------------------------------------
+            ## segmentation functions ##
+
+            ## GrabCut segmentation (foreground/background separation)
+            # mask_roi, vis_grabcut = grabcut_segmentation(roi_rgb, iterations=5, show_steps=True)
+            # roi_coords = (rect_x1, rect_y1, rect_x2, rect_y2)
+            # mask = convert_roi_mask_to_global(mask_roi, roi_coords, rgb.shape)
+            
+            # SAM with box prompt (automatic mask selection)
+            mask_roi, vis_sam_box = sam_box_prompt_segmentation(roi_rgb, show_steps=True)
+            roi_coords = (rect_x1, rect_y1, rect_x2, rect_y2)
+            mask = convert_roi_mask_to_global(mask_roi, roi_coords, rgb.shape)
+            
+            ## Watershed s20egmentation (distance transform seeds)
+            # mask_roi, vis_watershed = watershed_roi_segmentation(roi_rgb, distance_threshold=0.3, show_steps=True)
+            # roi_coords = (rect_x1, rect_y1, rect_x2, rect_y2)
+            # mask = convert_roi_mask_to_global(mask_roi, roi_coords, rgb.shape)
+
+
+            ### ---------------------------------------------------------------------------
+            ## Blurring the object ##
+            
+            if mask is not None:
+                mask, blurred_full = create_blurred_mask(rgb, mask, pixelation_strength=13, bit_depth=5, show_histogram=True, verbose=True)
+
+                result = rgb.copy()
+                result[mask == 255] = blurred_full[mask == 255]
+                show_image([result], titles=["Object blurred"], row_plot=1)
+
+            else: 
+                print("No mask generated, skipping blurring step.")
+                print("check and activate one of the image processing / segmentation functions.")
+
+
+        else:
+            print("No ROI selected - active again and select ROI from the image.")
     
-        roi_gray = cv2.cvtColor(roi_rgb, cv2.COLOR_RGB2GRAY)
+    elif mode == 'video':
+        print("\n[VIDEO MODE] Starting video processing...\n")
         
-        ### ---------------------------------------------------------------------------
-        ### first image processing functions ##
-
-        # # Binary than grey mask
-        # roi_gray_masked = binary_mask(roi_gray)
-        # corners = detect_corners_ShiTomasi(roi_gray_masked, max_corner=30)
-        # global_points = translate_corners_to_global(corners, rect_x1, rect_y1)
-        # rgb_debug = debug_draw_corners(rgb.copy(), global_points)
-        # show_image([rgb_debug], titles=["Binary Mask debug"], row_plot=1)
-        # mask = create_mask_from_points(global_points, rgb.shape)
-
-        # # Dilation 
-        # dilated = diliation(roi_gray)
-        # corners = detect_corners_ShiTomasi(dilated, max_corner=30)
-        # global_points = translate_corners_to_global(corners, rect_x1, rect_y1)
-        # rgb_debug = debug_draw_corners(rgb.copy(), global_points)
-        # show_image([rgb_debug], titles=["Dilation debug"], row_plot=1)
-        # mask = create_mask_from_points(global_points, rgb.shape)
-
-        # # Morphological gradient
-        # outer = Morphological_gradient(roi_gray)
-        # corners = detect_corners_ShiTomasi(outer, max_corner=30)
-        # global_points = translate_corners_to_global(corners, rect_x1, rect_y1)
-        # rgb_debug = debug_draw_corners(rgb.copy(), global_points)
-        # show_image([rgb_debug], titles=["Morphological Gradient debug"], row_plot=1)
-        # mask = create_mask_from_points(global_points, rgb.shape)
-
-        # # Apply CLAHE on grayscale image
-        # he_clahe = clahe(roi_gray)
-        # corners = detect_corners_ShiTomasi(he_clahe, max_corner=30)
-        # global_points = translate_corners_to_global(corners, rect_x1, rect_y1)
-        # rgb_debug = debug_draw_corners(rgb.copy(), global_points)
-        # show_image([rgb_debug], titles=["CLAHE debug"], row_plot=1)
-        # mask = create_mask_from_points(global_points, rgb.shape)
-
-        # # Unsharp masking (blur → subtract → sharpen)
-        # sharpen = unsharp_masking(roi_gray)
-        # corners = detect_corners_ShiTomasi(sharpen, max_corner=30)
-        # global_points = translate_corners_to_global(corners, rect_x1, rect_y1)
-        # rgb_debug = debug_draw_corners(rgb.copy(), global_points)
-        # show_image([rgb_debug], titles=["Unsharp Masking debug"], row_plot=1)
-        # mask = create_mask_from_points(global_points, rgb.shape)
-
-
-        ### ---------------------------------------------------------------------------
-        ## second image processing functions ##
-
-        # # Custom sharpening kernel
-        # sharp = custom_kernel(roi_gray)
-        # corners = detect_corners_ShiTomasi(sharp, max_corner=30)
-        # global_points = translate_corners_to_global(corners, rect_x1, rect_y1)
-        # rgb_debug = debug_draw_corners(rgb.copy(), global_points)
-        # show_image([rgb_debug], titles=["Custom Kernel debug"], row_plot=1)
-        # mask = create_mask_from_points(global_points, rgb.shape)
-
-        # # Sobel gradients (derivatives)
-        # sobel_mag = sobel(roi_gray)
-        # corners = detect_corners_ShiTomasi(sobel_mag, max_corner=30)
-        # global_points = translate_corners_to_global(corners, rect_x1, rect_y1)
-        # rgb_debug = debug_draw_corners(rgb.copy(), global_points)
-        # show_image([rgb_debug], titles=["Sobel debug"], row_plot=1)
-        # mask = create_mask_from_points(global_points, rgb.shape)
-
-        # # Laplacian (second derivative)
-        # lap = laplacian(roi_gray)
-        # corners = detect_corners_ShiTomasi(lap, max_corner=30)
-        # global_points = translate_corners_to_global(corners, rect_x1, rect_y1)
-        # rgb_debug = debug_draw_corners(rgb.copy(), global_points)
-        # show_image([rgb_debug], titles=["Laplacian debug"], row_plot=1)
-        # mask = create_mask_from_points(global_points, rgb.shape)
-
-        # # Canny (works on 8-bit)
-        # edges = canny(roi_gray)
-        # corners = detect_corners_ShiTomasi(edges, max_corner=30)
-        # global_points = translate_corners_to_global(corners, rect_x1, rect_y1)
-        # rgb_debug = debug_draw_corners(rgb.copy(), global_points)
-        # show_image([rgb_debug], titles=["Canny debug"], row_plot=1)
-        # mask = create_mask_from_points(global_points, rgb.shape)
-
-        ### ---------------------------------------------------------------------------
-        ## segmentation functions ##
-
-        ## GrabCut segmentation (foreground/background separation)
-        # mask_roi, vis_grabcut = grabcut_segmentation(roi_rgb, iterations=5, show_steps=True)
-        # roi_coords = (rect_x1, rect_y1, rect_x2, rect_y2)
-        # mask = convert_roi_mask_to_global(mask_roi, roi_coords, rgb.shape)
+        # Select tracking method
+        tracker = select_tracker()
         
-        # SAM with box prompt (automatic mask selection)
-        mask_roi, vis_sam_box = sam_box_prompt_segmentation(roi_rgb, show_steps=True)
-        roi_coords = (rect_x1, rect_y1, rect_x2, rect_y2)
-        mask = convert_roi_mask_to_global(mask_roi, roi_coords, rgb.shape)
+        # Specify video filename (change this to your video file)
+        selected_video = "VID_007.mp4" 
         
-        ## Watershed segmentation (distance transform seeds)
-        # mask_roi, vis_watershed = watershed_roi_segmentation(roi_rgb, distance_threshold=0.3, show_steps=True)
-        # roi_coords = (rect_x1, rect_y1, rect_x2, rect_y2)
-        # mask = convert_roi_mask_to_global(mask_roi, roi_coords, rgb.shape)
-
-
-        ### ---------------------------------------------------------------------------
-        ## Blurring the object ##
+        # Generate output filename with timestamp
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        video_stem = Path(selected_video).stem
+        tracker_suffix = "flow" if isinstance(tracker, FlowWarpTracker) else "klt"
+        output_video = f"{video_stem}_blur_{tracker_suffix}_{timestamp}.mp4"
         
-        if mask is not None:
-            mask, blurred_full = create_blurred_mask(rgb, mask, pixelation_strength=13, bit_depth=5, show_histogram=True, verbose=True)
-
-            result = rgb.copy()
-            result[mask == 255] = blurred_full[mask == 255]
-            show_image([result], titles=["Object blurred"], row_plot=1)
-
-        else: 
-            print("No mask generated, skipping blurring step.")
-            print("check and activate one of the image processing / segmentation functions.")
-
-
-    else:
-        print("No ROI selected - active again and select ROI from the image.")
+        print(f"\nInput video: {selected_video}")
+        print(f"Output will be saved as: {output_video}\n")
+        
+        # Process video with selected tracker
+        summary = process_video_with_sam_tracker(
+            video_name=selected_video,
+            output_name=output_video,
+            tracker=tracker,
+            pixelation_strength=13,
+            bit_depth=5,
+            area_ratio_range=(0.5, 2.0),
+            centroid_shift_threshold=50,
+            progress_interval=10
+        )
+        
+        if summary is not None:
+            print("Video processing completed successfully!")
+        else:
+            print("Video processing failed.")
