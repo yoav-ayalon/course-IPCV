@@ -1,19 +1,12 @@
 import numpy as np
 import matplotlib.pyplot as plt
-# import pandas as pd
-# import scipy.stats as stats
 import cv2
-# from skimage import exposure
 from skimage import filters, exposure
+from skimage.io import imsave
 import os
-from skimage.io import imread, imsave
-from skimage.color import rgb2hsv, hsv2rgb
-# from skimage.util import img_as_float
 from typing import List, Union
 from pathlib import Path
 import scipy.ndimage as ndi
-#scikit-image==0.24.0
-#opencv-python
 
 
 script_dir = Path(__file__).resolve().parent
