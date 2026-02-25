@@ -228,13 +228,7 @@ def select_tracker():
     print("="*60)
     print("\nAvailable tracking methods:\n")
     print("  1. Dense Optical Flow - Pixel-wise warping (Farneback algorithm)")
-    print("     • More flexible for deformable objects")
-    print("     • Requires conservative morphology to prevent bleeding")
-    print()
     print("  2. KLT Feature Tracking - Global transform (feature points)")
-    print("     • More stable for rigid/semi-rigid objects")
-    print("     • Warps entire mask as one unit, less degradation")
-    print()
     
     while True:
         choice = input("Enter your choice (1 or 2): ").strip()
@@ -273,15 +267,7 @@ def select_segmentation_method():
     print("="*60)
     print("\nChoose initial mask generation method:\n")
     print("  1. SAM (Segment Anything Model)")
-    print("     • Deep learning segmentation")
-    print("     • High quality object boundaries")
-    print("     • Requires SAM checkpoint")
-    print()
     print("  2. Corner Detection (Shi-Tomasi) + Convex Hull")
-    print("     • Feature point detection")
-    print("     • Fast and lightweight")
-    print("     • Good for well-defined objects")
-    print()
     
     while True:
         choice = input("Enter your choice (1 or 2): ").strip()
@@ -1327,7 +1313,7 @@ def check_tracking_quality(mask_prev, mask_curr, area_ratio_range=(0.5, 2.0), ce
     return is_good, metrics
 
 
-def process_video_with_sam_tracker(
+def process_video(
     video_name,
     output_name,
     tracker,
@@ -1335,8 +1321,7 @@ def process_video_with_sam_tracker(
     bit_depth=5,
     area_ratio_range=(0.5, 2.0),
     centroid_shift_threshold=50,
-    progress_interval=30
-):
+    progress_interval=30):
     """
     Video processing with modular tracker (Flow or KLT).
     
@@ -1613,6 +1598,128 @@ def process_video_with_sam_tracker(
     return summary
 
 
+###----------------------------------- Image Processing Function -------------------------------
+
+def process_image(
+    image_name,
+    output_name,
+    pixelation_strength=13,
+    bit_depth=5,
+    show_steps=True):
+    """
+    Process a single image with ROI selection and mask-based anonymization.
+    
+    Args:
+        image_name: Input image filename in IMG/ folder
+        output_name: Output image filename (saved to IMG/ folder)
+        pixelation_strength: Pixelation strength for blur (5-20, lower=stronger)
+        bit_depth: Color quantization depth (3-6, lower=stronger)
+        show_steps: Whether to show intermediate segmentation visualization
+    
+    Returns:
+        summary: Dict with processing statistics
+    """
+    print(f"\n{'='*60}")
+    print(f"  IMAGE PROCESSING: {image_name}")
+    print(f"{'='*60}\n")
+    
+    # Load image
+    print("Loading image...")
+    bgr, gray, rgb = load_image(image_name)
+    print(f"Image loaded: {rgb.shape[1]}x{rgb.shape[0]}\n")
+    
+    # ROI selection
+    print("Please select ROI on the image...")
+    roi_coords, roi_rgb = select_roi_on_rgb(rgb)
+    if roi_rgb is None:
+        print("ERROR: No ROI selected")
+        return None
+    
+    rect_x1, rect_y1, rect_x2, rect_y2 = roi_coords
+    print(f"ROI selected: ({rect_x1}, {rect_y1}) to ({rect_x2}, {rect_y2})\n")
+    
+    # Select segmentation method
+    segmentation_method = select_segmentation_method()
+    
+    # Generate mask based on selected method
+    if segmentation_method == 'sam':
+        print("\nRunning SAM segmentation...")
+        mask_roi, _ = sam_box_prompt_segmentation(roi_rgb, show_steps=show_steps)
+        if mask_roi is None:
+            print("ERROR: SAM segmentation failed")
+            return None
+        mask = convert_roi_mask_to_global(mask_roi, roi_coords, rgb.shape)
+    
+    elif segmentation_method == 'corners':
+        print("\nRunning corner detection...")
+        roi_gray = cv2.cvtColor(roi_rgb, cv2.COLOR_RGB2GRAY)
+        
+        # Detect corners in ROI
+        corners = detect_corners_ShiTomasi(roi_gray, max_corner=150)
+        if corners is None:
+            print("ERROR: Corner detection failed - no corners found")
+            return None
+        
+        print(f"Detected {len(corners)} corners in ROI")
+        
+        # Translate to global coordinates
+        global_points = translate_corners_to_global(corners, rect_x1, rect_y1)
+        
+        # Create mask from convex hull
+        mask = create_mask_from_points(global_points, rgb.shape)
+        
+        # Optional: visualize mask
+        if show_steps:
+            mask_visualization = _overlay_mask(rgb, mask.astype(bool), alpha=0.4)
+            show_image([rgb, mask_visualization], row_plot=1,
+                      titles=["Original Image", "Corner-based Mask"])
+    
+    else:
+        print(f"ERROR: Unknown segmentation method: {segmentation_method}")
+        return None
+    
+    # Check mask validity
+    mask_area = np.sum(mask > 0)
+    if mask_area == 0:
+        print("ERROR: Generated mask is empty")
+        return None
+    
+    print(f"\nMask generated successfully:")
+    print(f"  Area: {mask_area} pixels")
+    bbox = get_mask_bbox(mask)
+    print(f"  Bbox: {bbox}\n")
+    
+    # Apply anonymization
+    print(f"Applying anonymization (pixelation={pixelation_strength}, bit_depth={bit_depth})...")
+    _, anonymized = create_blurred_mask(
+        rgb, mask,
+        pixelation_strength=pixelation_strength,
+        bit_depth=bit_depth,
+        show_histogram=False,
+        verbose=False
+    )
+    
+    # Save output
+    output_path = images_dir / output_name
+    imsave(str(output_path), anonymized)
+    print(f"Output saved: {output_path}\n")
+    
+    print(f"{'='*60}")
+    print(f"  IMAGE PROCESSING COMPLETE")
+    print(f"{'='*60}\n")
+    
+    summary = {
+        'image_name': image_name,
+        'output_name': output_name,
+        'segmentation_method': segmentation_method,
+        'mask_area': int(mask_area),
+        'bbox': bbox,
+        'output_path': str(output_path)
+    }
+    
+    return summary
+
+
 ###----------------------------------- corner detection functions -------------------------------
 
 def detect_corners_ShiTomasi(gray, max_corner=150):
@@ -1810,132 +1917,165 @@ if __name__ == "__main__":
     if mode == 'image':
         print("\n[IMAGE MODE] Starting image processing...\n")
         
-        ## Initial setup ##
-        bgr, gray, rgb = load_image("IMG_004.jpeg")
-
-        (rect_x1, rect_y1, rect_x2, rect_y2), roi_rgb = select_roi_on_rgb(rgb)
-        print(f"Selected rectangle: ({rect_x1}, {rect_y1}) to ({rect_x2}, {rect_y2})")
+        ## Option 1: Use the integrated process_image function (recommended)
+        ## This uses select_segmentation_method() to choose SAM or Corner detection
         
-        if roi_rgb is not None:
-            show_image(roi_rgb, titles=["Selected ROI"], row_plot=1)
+        # Specify input image filename (change this to your image file)
+        selected_image = "YOUR_IMAGE_FROM_IMG_FOLDER.jpeg"
         
-            roi_gray = cv2.cvtColor(roi_rgb, cv2.COLOR_RGB2GRAY)
-            
-            ### ---------------------------------------------------------------------------
-            ### first image processing functions ##
-
-            # # Binary than grey mask
-            # roi_gray_masked = binary_mask(roi_gray)
-            # corners = detect_corners_ShiTomasi(roi_gray_masked, max_corner=30)
-            # global_points = translate_corners_to_global(corners, rect_x1, rect_y1)
-            # rgb_debug = debug_draw_corners(rgb.copy(), global_points)
-            # show_image([rgb_debug], titles=["Binary Mask debug"], row_plot=1)
-            # mask = create_mask_from_points(global_points, rgb.shape)
-
-            # # Dilation 
-            # dilated = diliation(roi_gray)
-            # corners = detect_corners_ShiTomasi(dilated, max_corner=30)
-            # global_points = translate_corners_to_global(corners, rect_x1, rect_y1)
-            # rgb_debug = debug_draw_corners(rgb.copy(), global_points)
-            # show_image([rgb_debug], titles=["Dilation debug"], row_plot=1)
-            # mask = create_mask_from_points(global_points, rgb.shape)
-
-            # # Morphological gradient
-            # outer = Morphological_gradient(roi_gray)
-            # corners = detect_corners_ShiTomasi(outer, max_corner=30)
-            # global_points = translate_corners_to_global(corners, rect_x1, rect_y1)
-            # rgb_debug = debug_draw_corners(rgb.copy(), global_points)
-            # show_image([rgb_debug], titles=["Morphological Gradient debug"], row_plot=1)
-            # mask = create_mask_from_points(global_points, rgb.shape)
-
-            # # Apply CLAHE on grayscale image
-            # he_clahe = clahe(roi_gray)
-            # corners = detect_corners_ShiTomasi(he_clahe, max_corner=30)
-            # global_points = translate_corners_to_global(corners, rect_x1, rect_y1)
-            # rgb_debug = debug_draw_corners(rgb.copy(), global_points)
-            # show_image([rgb_debug], titles=["CLAHE debug"], row_plot=1)
-            # mask = create_mask_from_points(global_points, rgb.shape)
-
-            # # Unsharp masking (blur → subtract → sharpen)
-            # sharpen = unsharp_masking(roi_gray)
-            # corners = detect_corners_ShiTomasi(sharpen, max_corner=30)
-            # global_points = translate_corners_to_global(corners, rect_x1, rect_y1)
-            # rgb_debug = debug_draw_corners(rgb.copy(), global_points)
-            # show_image([rgb_debug], titles=["Unsharp Masking debug"], row_plot=1)
-            # mask = create_mask_from_points(global_points, rgb.shape)
-
-
-            ### ---------------------------------------------------------------------------
-            ## second image processing functions ##
-
-            # # Custom sharpening kernel
-            # sharp = custom_kernel(roi_gray)
-            # corners = detect_corners_ShiTomasi(sharp, max_corner=30)
-            # global_points = translate_corners_to_global(corners, rect_x1, rect_y1)
-            # rgb_debug = debug_draw_corners(rgb.copy(), global_points)
-            # show_image([rgb_debug], titles=["Custom Kernel debug"], row_plot=1)
-            # mask = create_mask_from_points(global_points, rgb.shape)
-
-            # # Sobel gradients (derivatives)
-            # sobel_mag = sobel(roi_gray)
-            # corners = detect_corners_ShiTomasi(sobel_mag, max_corner=30)
-            # global_points = translate_corners_to_global(corners, rect_x1, rect_y1)
-            # rgb_debug = debug_draw_corners(rgb.copy(), global_points)
-            # show_image([rgb_debug], titles=["Sobel debug"], row_plot=1)
-            # mask = create_mask_from_points(global_points, rgb.shape)
-
-            # # Laplacian (second derivative)
-            # lap = laplacian(roi_gray)
-            # corners = detect_corners_ShiTomasi(lap, max_corner=30)
-            # global_points = translate_corners_to_global(corners, rect_x1, rect_y1)
-            # rgb_debug = debug_draw_corners(rgb.copy(), global_points)
-            # show_image([rgb_debug], titles=["Laplacian debug"], row_plot=1)
-            # mask = create_mask_from_points(global_points, rgb.shape)
-
-            # # Canny (works on 8-bit)
-            # edges = canny(roi_gray)
-            # corners = detect_corners_ShiTomasi(edges, max_corner=30)
-            # global_points = translate_corners_to_global(corners, rect_x1, rect_y1)
-            # rgb_debug = debug_draw_corners(rgb.copy(), global_points)
-            # show_image([rgb_debug], titles=["Canny debug"], row_plot=1)
-            # mask = create_mask_from_points(global_points, rgb.shape)
-
-            ### ---------------------------------------------------------------------------
-            ## segmentation functions ##
-
-            ## GrabCut segmentation (foreground/background separation)
-            # mask_roi, vis_grabcut = grabcut_segmentation(roi_rgb, iterations=5, show_steps=True)
-            # roi_coords = (rect_x1, rect_y1, rect_x2, rect_y2)
-            # mask = convert_roi_mask_to_global(mask_roi, roi_coords, rgb.shape)
-            
-            # SAM with box prompt (automatic mask selection)
-            mask_roi, vis_sam_box = sam_box_prompt_segmentation(roi_rgb, show_steps=True)
-            roi_coords = (rect_x1, rect_y1, rect_x2, rect_y2)
-            mask = convert_roi_mask_to_global(mask_roi, roi_coords, rgb.shape)
-            
-            ## Watershed s20egmentation (distance transform seeds)
-            # mask_roi, vis_watershed = watershed_roi_segmentation(roi_rgb, distance_threshold=0.3, show_steps=True)
-            # roi_coords = (rect_x1, rect_y1, rect_x2, rect_y2)
-            # mask = convert_roi_mask_to_global(mask_roi, roi_coords, rgb.shape)
-
-
-            ### ---------------------------------------------------------------------------
-            ## Blurring the object ##
-            
-            if mask is not None:
-                mask, blurred_full = create_blurred_mask(rgb, mask, pixelation_strength=13, bit_depth=5, show_histogram=True, verbose=True)
-
-                result = rgb.copy()
-                result[mask == 255] = blurred_full[mask == 255]
-                show_image([result], titles=["Object blurred"], row_plot=1)
-
-            else: 
-                print("No mask generated, skipping blurring step.")
-                print("check and activate one of the image processing / segmentation functions.")
-
-
+        # Generate output filename with timestamp
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        image_stem = Path(selected_image).stem
+        output_image = f"{image_stem}_anonymized_{timestamp}.png"
+        
+        print(f"Input image: {selected_image}")
+        print(f"Output will be saved as: {output_image}\n")
+        
+        # Process image with selected segmentation method
+        summary = process_image(
+            image_name=selected_image,
+            output_name=output_image,
+            pixelation_strength=13,
+            bit_depth=5,
+            show_steps=True
+        )
+        
+        if summary is not None:
+            print("Image processing completed successfully!")
         else:
-            print("No ROI selected - active again and select ROI from the image.")
+            print("Image processing failed.")
+        
+        
+        ## Option 2: Manual processing with custom function combinations
+        ## Uncomment this section to use specific processing functions
+        
+        # ## Initial setup ##
+        # bgr, gray, rgb = load_image("IMG_004.jpeg")
+
+        # (rect_x1, rect_y1, rect_x2, rect_y2), roi_rgb = select_roi_on_rgb(rgb)
+        # print(f"Selected rectangle: ({rect_x1}, {rect_y1}) to ({rect_x2}, {rect_y2})")
+        
+        # if roi_rgb is not None:
+        #     show_image(roi_rgb, titles=["Selected ROI"], row_plot=1)
+        
+        #     roi_gray = cv2.cvtColor(roi_rgb, cv2.COLOR_RGB2GRAY)
+            
+        #     ### ---------------------------------------------------------------------------
+        #     ### first image processing functions ##
+
+        #     # # Binary than grey mask
+        #     # roi_gray_masked = binary_mask(roi_gray)
+        #     # corners = detect_corners_ShiTomasi(roi_gray_masked, max_corner=30)
+        #     # global_points = translate_corners_to_global(corners, rect_x1, rect_y1)
+        #     # rgb_debug = debug_draw_corners(rgb.copy(), global_points)
+        #     # show_image([rgb_debug], titles=["Binary Mask debug"], row_plot=1)
+        #     # mask = create_mask_from_points(global_points, rgb.shape)
+
+        #     # # Dilation 
+        #     # dilated = diliation(roi_gray)
+        #     # corners = detect_corners_ShiTomasi(dilated, max_corner=30)
+        #     # global_points = translate_corners_to_global(corners, rect_x1, rect_y1)
+        #     # rgb_debug = debug_draw_corners(rgb.copy(), global_points)
+        #     # show_image([rgb_debug], titles=["Dilation debug"], row_plot=1)
+        #     # mask = create_mask_from_points(global_points, rgb.shape)
+
+        #     # # Morphological gradient
+        #     # outer = Morphological_gradient(roi_gray)
+        #     # corners = detect_corners_ShiTomasi(outer, max_corner=30)
+        #     # global_points = translate_corners_to_global(corners, rect_x1, rect_y1)
+        #     # rgb_debug = debug_draw_corners(rgb.copy(), global_points)
+        #     # show_image([rgb_debug], titles=["Morphological Gradient debug"], row_plot=1)
+        #     # mask = create_mask_from_points(global_points, rgb.shape)
+
+        #     # # Apply CLAHE on grayscale image
+        #     # he_clahe = clahe(roi_gray)
+        #     # corners = detect_corners_ShiTomasi(he_clahe, max_corner=30)
+        #     # global_points = translate_corners_to_global(corners, rect_x1, rect_y1)
+        #     # rgb_debug = debug_draw_corners(rgb.copy(), global_points)
+        #     # show_image([rgb_debug], titles=["CLAHE debug"], row_plot=1)
+        #     # mask = create_mask_from_points(global_points, rgb.shape)
+
+        #     # # Unsharp masking (blur → subtract → sharpen)
+        #     # sharpen = unsharp_masking(roi_gray)
+        #     # corners = detect_corners_ShiTomasi(sharpen, max_corner=30)
+        #     # global_points = translate_corners_to_global(corners, rect_x1, rect_y1)
+        #     # rgb_debug = debug_draw_corners(rgb.copy(), global_points)
+        #     # show_image([rgb_debug], titles=["Unsharp Masking debug"], row_plot=1)
+        #     # mask = create_mask_from_points(global_points, rgb.shape)
+
+
+        #     ### ---------------------------------------------------------------------------
+        #     ## second image processing functions ##
+
+        #     # # Custom sharpening kernel
+        #     # sharp = custom_kernel(roi_gray)
+        #     # corners = detect_corners_ShiTomasi(sharp, max_corner=30)
+        #     # global_points = translate_corners_to_global(corners, rect_x1, rect_y1)
+        #     # rgb_debug = debug_draw_corners(rgb.copy(), global_points)
+        #     # show_image([rgb_debug], titles=["Custom Kernel debug"], row_plot=1)
+        #     # mask = create_mask_from_points(global_points, rgb.shape)
+
+        #     # # Sobel gradients (derivatives)
+        #     # sobel_mag = sobel(roi_gray)
+        #     # corners = detect_corners_ShiTomasi(sobel_mag, max_corner=30)
+        #     # global_points = translate_corners_to_global(corners, rect_x1, rect_y1)
+        #     # rgb_debug = debug_draw_corners(rgb.copy(), global_points)
+        #     # show_image([rgb_debug], titles=["Sobel debug"], row_plot=1)
+        #     # mask = create_mask_from_points(global_points, rgb.shape)
+
+        #     # # Laplacian (second derivative)
+        #     # lap = laplacian(roi_gray)
+        #     # corners = detect_corners_ShiTomasi(lap, max_corner=30)
+        #     # global_points = translate_corners_to_global(corners, rect_x1, rect_y1)
+        #     # rgb_debug = debug_draw_corners(rgb.copy(), global_points)
+        #     # show_image([rgb_debug], titles=["Laplacian debug"], row_plot=1)
+        #     # mask = create_mask_from_points(global_points, rgb.shape)
+
+        #     # # Canny (works on 8-bit)
+        #     # edges = canny(roi_gray)
+        #     # corners = detect_corners_ShiTomasi(edges, max_corner=30)
+        #     # global_points = translate_corners_to_global(corners, rect_x1, rect_y1)
+        #     # rgb_debug = debug_draw_corners(rgb.copy(), global_points)
+        #     # show_image([rgb_debug], titles=["Canny debug"], row_plot=1)
+        #     # mask = create_mask_from_points(global_points, rgb.shape)
+
+        #     ### ---------------------------------------------------------------------------
+        #     ## segmentation functions ##
+
+        #     ## GrabCut segmentation (foreground/background separation)
+        #     # mask_roi, vis_grabcut = grabcut_segmentation(roi_rgb, iterations=5, show_steps=True)
+        #     # roi_coords = (rect_x1, rect_y1, rect_x2, rect_y2)
+        #     # mask = convert_roi_mask_to_global(mask_roi, roi_coords, rgb.shape)
+            
+        #     # SAM with box prompt (automatic mask selection)
+        #     mask_roi, vis_sam_box = sam_box_prompt_segmentation(roi_rgb, show_steps=True)
+        #     roi_coords = (rect_x1, rect_y1, rect_x2, rect_y2)
+        #     mask = convert_roi_mask_to_global(mask_roi, roi_coords, rgb.shape)
+            
+        #     ## Watershed segmentation (distance transform seeds)
+        #     # mask_roi, vis_watershed = watershed_roi_segmentation(roi_rgb, distance_threshold=0.3, show_steps=True)
+        #     # roi_coords = (rect_x1, rect_y1, rect_x2, rect_y2)
+        #     # mask = convert_roi_mask_to_global(mask_roi, roi_coords, rgb.shape)
+
+
+        #     ### ---------------------------------------------------------------------------
+        #     ## Blurring the object ##
+            
+        #     if mask is not None:
+        #         mask, blurred_full = create_blurred_mask(rgb, mask, pixelation_strength=13, bit_depth=5, show_histogram=True, verbose=True)
+
+        #         result = rgb.copy()
+        #         result[mask == 255] = blurred_full[mask == 255]
+        #         show_image([result], titles=["Object blurred"], row_plot=1)
+
+        #     else: 
+        #         print("No mask generated, skipping blurring step.")
+        #         print("check and activate one of the image processing / segmentation functions.")
+
+
+        # else:
+        #     print("No ROI selected - active again and select ROI from the image.")
     
     elif mode == 'video':
         print("\n[VIDEO MODE] Starting video processing...\n")
@@ -1944,7 +2084,7 @@ if __name__ == "__main__":
         tracker = select_tracker()
         
         # Specify video filename (change this to your video file)
-        selected_video = "VID_007.mp4" 
+        selected_video = "YOUR_VIDEO_FROM_VID_FOLDER.mp4" 
         
         # Generate output filename with timestamp
         from datetime import datetime
@@ -1957,7 +2097,7 @@ if __name__ == "__main__":
         print(f"Output will be saved as: {output_video}\n")
         
         # Process video with selected tracker
-        summary = process_video_with_sam_tracker(
+        summary = process_video(
             video_name=selected_video,
             output_name=output_video,
             tracker=tracker,
@@ -1972,3 +2112,8 @@ if __name__ == "__main__":
             print("Video processing completed successfully!")
         else:
             print("Video processing failed.")
+
+
+
+
+
